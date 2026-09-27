@@ -153,7 +153,9 @@ datagrams before each send so replies cannot get off-by-one.
   the encoder, stepping the tracking RA axis by the servo's following error (~2 counts,
   sign set by the mount's balance), which put ConformU's 5 s E/W pulses outside tolerance.
   That board skips the re-latch at every live-rate site (pulse dispatch and restore, the
-  rate setters, the dispatch-failure recovery); the verify and its `:I`+`:J` resend stay.
+  rate setters, the dispatch-failure recovery); the verify and its `:I`+`:J` resend stay,
+  so 0x09 still sends a `:J` (and takes its ~2-count step) whenever the verify finds a
+  stalled `:I` -- up to twice on a long pulse (dispatch and post-stop).
   Add a board to that exception only on the same evidence: bare `:I` applied on hardware
   AND a measured `:J` position step. Pulses ≥ 1.5 s verify inside the
   pulse task (the window is deducted from the pulse; shorter pulses rely on the kick alone,

@@ -156,7 +156,8 @@ constexpr double kMinInPlacePulseRateDegPerSec = 0.05 * kSiderealDegPerSec;
 // of wall time DURING the pulse (more at small rate deltas, where the sample
 // window stretches to stay resolvable); on a typical 50-500 ms autoguider
 // pulse that would dominate the pulse itself, so those rely on the ":J" kick
-// alone.
+// alone (or, on a board that skips the re-latch, on the bare ":I" alone --
+// see live_rate_change_needs_relatch()).
 constexpr int kMinPulseForRateVerifyMs = 1500;
 // verify_live_rate_or_rekick timing. kRateVerifyMaxWindow is the ceiling
 // used by callers with no duration budget to respect (the RightAscensionRate
@@ -3069,7 +3070,8 @@ private:
         // hardware 2026-09-10 as a spurious "did not take" + resend on a
         // TrackingRate=Lunar write. Stretch the window as far as needed, up
         // to max_window; past that the change is below what this check can
-        // resolve within its budget, so leave it to the ":J" kick alone.
+        // resolve within its budget, so leave it to the ":J" kick alone (the
+        // bare ":I" alone on a board that skips the re-latch).
         const auto effective_max_window = std::min(max_window, kRateVerifyMaxWindow);
         constexpr double kMinResolvableDeltaCounts = 4.0;
         const double delta_counts_per_sec = std::abs(expected_counts_per_sec - previous_counts_per_sec);
@@ -3547,7 +3549,9 @@ private:
             // place — the axis never stops. ":J" kick for the same reason
             // as the PulseGuide live-rate change (see
             // verify_live_rate_or_rekick): a bare ":I" here is not always
-            // enough on this firmware. The sampled rate-applied check cannot
+            // enough on some firmware (EQM-35 Pro), except on boards where
+            // live_rate_change_needs_relatch() is false (the EQ-AL55i Pro),
+            // which apply a bare ":I" and skip the kick. The sampled rate-applied check cannot
             // run here (synchronous under mutex_ from a property setter, and
             // it needs an unlocked ~450 ms window), so it runs as a one-shot
             // background task instead.

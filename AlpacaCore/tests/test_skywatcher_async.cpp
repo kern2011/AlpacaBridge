@@ -2128,6 +2128,9 @@ TEST_CASE("SkyWatcher async - an RA guide pulse sends no :J re-latch on the EQ-A
     // mount's balance), and a bare ":I" is applied on its own. So an East/West
     // pulse there changes the step period in place with no ":J" at dispatch or
     // at restore. Every other board keeps both kicks.
+    // The eq_al55i() fixture reports MC firmware 3.46 (the reporter's board);
+    // the hardware evidence behind the gate is from MC 3.48. The gate keys on
+    // the mount code alone, so the fixture's firmware does not change the rule.
     struct Case {
         const char* name;
         alpacacore::test::FakeMountProfile profile;
@@ -2166,6 +2169,7 @@ TEST_CASE("SkyWatcher async - a RightAscensionRate write sends no :J re-latch on
           "[skywatcher][async][al55i]") {
     // The setter path (apply_ra_tracking_rate_locked) makes the same live
     // in-place change as a pulse, so it follows the same per-board rule.
+    // (Fixture firmware is MC 3.46; the evidence is from MC 3.48 -- see above.)
     struct Case {
         const char* name;
         alpacacore::test::FakeMountProfile profile;
@@ -2204,6 +2208,7 @@ TEST_CASE("SkyWatcher async - a stalled bare :I on the EQ-AL55i Pro is still cau
     // Dropping the ":J" re-latch on 0x09 leaves the sampled check as the only
     // guard against a live ":I" that is stored but not applied. On a pulse long
     // enough to run it, that check must still resend ":I"+":J".
+    // (Fixture firmware is MC 3.46; the evidence is from MC 3.48 -- see above.)
     FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::eq_al55i());
     REQUIRE(mount.ok());
     auto driver = connected_driver(mount);
