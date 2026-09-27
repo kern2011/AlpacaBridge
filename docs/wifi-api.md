@@ -209,14 +209,15 @@ has no NTP, so the client's clock becomes the time source:
 
 - `GET /management/v1/synctime` — `Value` = the server's current Unix epoch
   (seconds, UTC). Poll it to show a live server clock or detect drift
-  against the client's clock.
+  against the client's clock. Outside the sanity range 2000-01-01..2100-01-01
+  UTC it answers ErrorCode `INVALID_OPERATION` with no `Value` field.
 - `POST/PUT /management/v1/synctime` with `{"Epoch": 1786298276}` (or
   `{"Value": …}`) — sets the SBC's system clock. Rejected outside the
   sanity range 2000-01-01..2100-01-01 UTC. Send the client's epoch captured
   at request time; add half the observed round-trip if you want to be exact.
   Since 3.6.0 this also takes the cross-origin guard above: a browser-based
-  client posting from a different origin gets HTTP 403 before the body is
-  read. `GET` is unaffected, so a live-clock poll works from any origin.
+  client posting from a different origin gets HTTP 403 without the request being
+  acted on. `GET` is unaffected, so a live-clock poll works from any origin.
 
 Same Alpaca envelope, same trusted-LAN model as the WiFi endpoints.
 

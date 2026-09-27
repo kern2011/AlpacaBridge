@@ -5127,6 +5127,34 @@ int main() {
         EXPECT(get_json["Value"].is_number_integer());
         EXPECT(get_json["Value"].get<std::int64_t>() > 1600000000);  // after 2020-09
 
+        // open-astro#670: GET answers through the NowFn seam and refuses a
+        // host clock outside the range POST accepts.
+        {
+            const auto at = [&](std::int64_t secs) {
+                router.set_now_fn([secs] { return std::chrono::system_clock::time_point(std::chrono::seconds(secs)); });
+                return nlohmann::json::parse(route_request(router, "GET", "/management/v1/synctime").body(), nullptr,
+                                             false);
+            };
+            const auto ok = at(1790467200);  // 2026-09-27T00:00:00Z
+            EXPECT(!ok.is_discarded() && ok.value("ErrorNumber", -1) == 0);
+            EXPECT(ok["Value"].get<std::int64_t>() == 1790467200);
+            for (const std::int64_t bad : {std::int64_t{10}, std::int64_t{4102444801}}) {
+                const auto j = at(bad);
+                EXPECT(!j.is_discarded());
+                EXPECT(j.value("ErrorNumber", 0) == static_cast<int>(alpacacore::AlpacaError::InvalidOperation));
+                EXPECT(j.value("ErrorMessage", "") ==
+                       "Host clock is outside 2000-01-01..2100-01-01 UTC; set the time with POST "
+                       "/management/v1/synctime.");
+                EXPECT(!j.contains("Value"));
+            }
+            for (const std::int64_t edge : {std::int64_t{946684800}, std::int64_t{4102444800}}) {
+                const auto j = at(edge);
+                EXPECT(j.value("ErrorNumber", -1) == 0);
+                EXPECT(j["Value"].get<std::int64_t>() == edge);
+            }
+            router.set_now_fn([] { return std::chrono::system_clock::now(); });
+        }
+
         // Out-of-range epochs are rejected without setting the clock. The
         // status check is not redundant with ErrorNumber: a 403 from the
         // cross-origin guard (issue #298) also carries a non-zero
@@ -5167,7 +5195,7 @@ int main() {
         // CSRF guard (issue #298): this endpoint sets the system clock and,
         // since #291, marks the host client-stepped, so it takes the same
         // Origin check the wifi endpoints use. A cross-origin mutating
-        // request is rejected with 403 before the body is even parsed.
+        // request is rejected with 403 before the body is acted on.
         {
             const std::string body = "{\"Epoch\": 100}";
             std::ostringstream raw;
@@ -5606,6 +5634,32 @@ int main() {
         }
 
         registry.unregister_device(alpacacore::DeviceType::Telescope, 9804);
+    }
+
+    // Issue #509: the 403 also echoes a ClientTransactionID that arrives only
+    // in the JSON body.
+    {
+        alpacahttp::Router router;
+        for (const char* path : {"/management/v1/description", "/management/v1/loglevel", "/management/v1/synctime"}) {
+            for (const char* method : {"PUT", "POST"}) {
+                const std::string body = R"({"ClientTransactionID": 4242})";
+                std::ostringstream raw;
+                raw << method << " " << path << " HTTP/1.1\r\n"
+                    << "Host: localhost\r\n"
+                    << "Origin: http://evil.example\r\n"
+                    << "Content-Type: application/json\r\n"
+                    << "Content-Length: " << body.size() << "\r\n\r\n"
+                    << body;
+                alpacahttp::Request request;
+                EXPECT(request.parse(raw.str()));
+                const auto response = router.route(request, 1);
+                EXPECT(response.status_code() == 403);
+                const auto json = nlohmann::json::parse(response.body(), nullptr, false);
+                EXPECT(!json.is_discarded());
+                EXPECT(json.value("ClientTransactionID", 0U) == 4242U);
+                EXPECT(json.value("ErrorMessage", "").find("Cross-origin") != std::string::npos);
+            }
+        }
     }
 
 #ifdef ALPACACORE_ENABLE_SKYWATCHER
