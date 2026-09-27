@@ -1980,8 +1980,9 @@ TEST_CASE("SkyWatcher async - a live step-period change the board stores but nev
     // failed, and count-sampling on the mount showed the axis holding
     // exactly its old rate through the whole pulse. The wrapper now follows
     // every live in-place ":I" with a ":J" (matching INDI's skywatcherAPI.cpp
-    // recipe), and the driver double-checks by sampling the position across
-    // a short window and re-kicking if the axis didn't actually change speed.
+    // recipe) on every board except the EQ-AL55i Pro (0x09, #666), and the
+    // driver double-checks by sampling the position across a short window and
+    // re-kicking if the axis didn't actually change speed.
     FakeSkyWatcherMount mount;
     REQUIRE(mount.ok());
     auto driver = connected_driver(mount);
