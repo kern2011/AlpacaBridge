@@ -87,9 +87,10 @@ constexpr int measured_dec_axis_sense(std::uint8_t mount_code) {
 // counts per ":J1" with the RA axis at -45 deg, -1.4 at +45 deg, bare mount).
 // Two per guide pulse put ConformU's 5 s East/West pulses outside its 0.07 s
 // tolerance. Such a board still gets the sampled rate-applied check and its
-// ":I"+":J" resend where the caller runs one. Gated on the mount code alone:
-// only MC 3.48 was measured, and the other 0x09 board on record (a reporter's,
-// MC 3.46) was not.
+// ":I"+":J" resend where the caller runs one. Gated on the mount code alone.
+// Only MC 3.48 was measured; the same mount ran MC 3.46 before a firmware
+// update, and Sky-Watcher's changelog lists 3.48's only change as support for
+// updating the Wi-Fi module's firmware, so 3.46 is not expected to differ.
 constexpr bool live_rate_change_needs_relatch(std::uint8_t mount_code) { return mount_code != 0x09; }
 
 constexpr uint32_t kCountsMask = 0xFFFFFF;

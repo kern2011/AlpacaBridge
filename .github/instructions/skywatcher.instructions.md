@@ -157,7 +157,10 @@ datagrams before each send so replies cannot get off-by-one.
   so 0x09 still sends a `:J` (and takes its ~2-count step) whenever the verify finds a
   stalled `:I` -- up to twice on a long pulse (dispatch and post-stop).
   Add a board to that exception only on the same evidence: bare `:I` applied on hardware
-  AND a measured `:J` position step. Pulses ≥ 1.5 s verify inside the
+  AND a measured `:J` position step. The measurements are from MC firmware 3.48; the
+  3.46 readings in `FakeMountProfile::eq_al55i()` are from the same mount before its
+  firmware update, and Sky-Watcher's changelog lists 3.48's only change as support for
+  updating the Wi-Fi module's firmware. Pulses ≥ 1.5 s verify inside the
   pulse task (the window is deducted from the pulse; shorter pulses rely on the kick alone,
   or on 0x09 on the bare `:I`);
   the `RightAscensionRate`/`TrackingRate` setters cannot wait 450 ms inside a property call,
