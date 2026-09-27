@@ -159,8 +159,7 @@ datagrams before each send so replies cannot get off-by-one.
   Add a board to that exception only on the same evidence: bare `:I` applied on hardware
   AND a measured `:J` position step. The measurements are from MC firmware 3.48; the
   3.46 readings in `FakeMountProfile::eq_al55i()` are from the same mount before its
-  firmware update, and Sky-Watcher's changelog lists 3.48's only change as support for
-  updating the Wi-Fi module's firmware. Pulses ≥ 1.5 s verify inside the
+  firmware update (see the EQ-AL55i Pro firmware release notes below). Pulses ≥ 1.5 s verify inside the
   pulse task (the window is deducted from the pulse; shorter pulses rely on the kick alone,
   or on 0x09 on the bare `:I`);
   the `RightAscensionRate`/`TrackingRate` setters cannot wait 450 ms inside a property call,
@@ -169,6 +168,12 @@ datagrams before each send so replies cannot get off-by-one.
   held (setters, Tracking off, `stop_axis_and_wait_locked`, pulse dispatch, AbortSlew,
   disconnect) — a lock-free reap would leave a window for a setter to spawn one between an
   initiator's reap and its lock, and the resend would land mid-pulse or on a stopped axis.
+- **EQ-AL55i Pro motor-board firmware release notes** (Sky-Watcher's own changelog, copied
+  verbatim; append each new version here). Both versions on record ran on the same mount.
+  3.48 lists no motor-control change, so motor behaviour measured on either version is
+  taken to hold for both:
+  - **3.48**: "Support upgrading the Wi-Fi module's firmware." (the only change listed)
+  - **3.46**: the first version on record (`:e` -> `=032E09`, `FakeMountProfile::eq_al55i()`).
 - `:f` status nibbles: char0 bit0 speed-mode/bit1 CCW/bit2 fast; char1 bit0 running/bit1
   blocked; char2 bit0 init-done/bit1 level switch. Slewing = running AND NOT speed-mode
   on either axis (a tracking axis is not slewing).
