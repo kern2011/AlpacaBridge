@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and [AlpacaHTTP](AlpacaHTTP/README.md).
 
+## [4.1.1] - UNRELEASED
+
+### Fixed
+- **Sky-Watcher direct driver: no false "step period readback" warning on the EQ-AL55i Pro** (AlpacaCore, issue #686; `skywatcher_telescope_driver.cpp`, `skywatcher_protocol_wrapper.cpp`): the board answers the `:i` step-period readback with `FFFFFF` on both axes whatever `:I` wrote, including while the axis runs at the written rate, so every write that asks for the readback (tracking start, Dec pulses, RA pulses while not tracking, MoveAxis, the `RightAscensionRate`/`TrackingRate` setters, the rate-check resend) logged `step period readback 16777215 != written ...`: 263 such lines in one day's service log. A new per-board check, `step_period_readback_usable()`, next to `measured_dec_axis_sense()`, turns the readback off at connect for mount code `0x09` through the wrapper's new public `disable_step_period_readback()`; every other board, and a board that cannot be identified, keeps it. The fake mount's `eq_al55i()` profile now answers `:i` with `FFFFFF` like the hardware and counts `:i` inquiries, and a new case pins that the EQ-AL55i Pro gets no `:i` and no readback warning while the Wave 100i and EQM-35 Pro still get the readback. Behaviour is otherwise unchanged: the readback never resent or threw.
+
 ## [4.1.0] - 2026-09-27
 
 ### Changed
