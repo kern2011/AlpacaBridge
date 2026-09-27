@@ -2167,6 +2167,43 @@ TEST_CASE("SkyWatcher async - an RA guide pulse sends no :J re-latch on the EQ-A
     }
 }
 
+TEST_CASE("SkyWatcher async - a reconnect that fails to identify the EQ-AL55i Pro restores the :J re-latch (#666)",
+          "[skywatcher][async][pulseguide][al55i]") {
+    // The skip belongs to the board that answered ":e" on THIS connect. The
+    // same driver reconnected to a board that does not identify must fall
+    // back to the re-latch every other board gets, not keep the previous
+    // connection's 0x09 answer. Same shape as the #458 sense test in
+    // test_skywatcher_pointing.cpp.
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::eq_al55i());
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+
+    auto east_pulse_starts = [&] {
+        driver->set_tracking(true);
+        REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
+        const uint32_t sidereal_preset = mount.step_period(1);
+        const int starts_before = mount.start_count(1);
+        driver->pulse_guide(2, 300);  // East, short: no rate-applied check
+        REQUIRE(wait_until([&] { return mount.step_period(1) != sidereal_preset; }, 3000));
+        REQUIRE(wait_until([&] { return mount.step_period(1) == sidereal_preset; }, 5000));
+        REQUIRE(wait_until([&] { return !driver->get_is_pulse_guiding(); }, 5000));
+        const int starts = mount.start_count(1) - starts_before;
+        driver->set_tracking(false);
+        return starts;
+    };
+
+    CHECK(east_pulse_starts() == 0);  // identified as 0x09: no re-latch
+
+    driver->set_connected(false);
+    mount.set_garbled_version_replies(true);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    CHECK(east_pulse_starts() == 2);  // unidentified: dispatch and restore both re-latch
+
+    driver->set_connected(false);
+}
+
 TEST_CASE("SkyWatcher async - a RightAscensionRate write sends no :J re-latch on the EQ-AL55i Pro (#666)",
           "[skywatcher][async][al55i]") {
     // The setter path (apply_ra_tracking_rate_locked) makes the same live

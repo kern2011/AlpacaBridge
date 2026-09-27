@@ -1448,7 +1448,8 @@ public:
             bool verify_dispatch_rate = false;
             // Set once the live ":I" at the pulse rate has gone out on a
             // tracking axis. From then on a dispatch failure (the ":J"
-            // re-latch below throwing, say) leaves the axis running at the
+            // re-latch below throwing, on a board that sends one; on 0x09
+            // only the ":I" itself can throw) leaves the axis running at the
             // pulse rate with nothing scheduled to bring it back: before the
             // ":J" kick a dispatch failure left the axis at its prior, safe
             // drive rate. Give the drive-rate restore the same retried care
