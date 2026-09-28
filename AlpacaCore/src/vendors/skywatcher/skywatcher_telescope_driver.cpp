@@ -445,7 +445,7 @@ public:
                                                   board.firmware_version);
                 dec_axis_sense_ = measured_dec_axis_sense(board.mount_code);  // open-astro#458
                 live_rate_relatch_ = live_rate_change_needs_relatch(board.mount_code);  // open-astro#666
-                if (!step_period_readback_usable(board.mount_code)) {         // open-astro#686
+                if (!step_period_readback_usable(board.mount_code)) {                   // open-astro#686
                     protocol.disable_step_period_readback();
                     ALPACA_LOG_INFO("SkyWatcher",
                                     "Step-period readback (':i') off for this board: it answers FFFFFF whatever was "
