@@ -543,9 +543,15 @@ TEST_CASE("SkyWatcher async - Dec pulse delivery is flat across durations on the
         for (int direction : {0, 1}) {  // North, South -- alternating, so the axis stays put
             const double before = mount.axis_degrees(2);
             driver->pulse_guide(direction, duration);
-            REQUIRE(wait_until([&] { return mount.axis_running(2); }, 3000));
-            REQUIRE(wait_until([&] { return !mount.axis_running(2); }, duration + 5000));
-            REQUIRE(wait_until([&] { return !driver->get_is_pulse_guiding(); }, duration + 5000));
+            // open-astro#666: on the EQ-AL55i Pro (0x09) a Dec pulse is now a
+            // position move (a brief GOTO), not a speed-mode nudge held for the
+            // whole duration, so "axis running" is not observable mid-pulse. The
+            // #306 property this case guards -- how accurately a given
+            // rate x duration is delivered on this board's distinct Dec cpr --
+            // is unchanged: wait for the pulse to finish and measure what the
+            // axis actually moved.
+            REQUIRE(wait_until([&] { return !driver->get_is_pulse_guiding(); }, duration + 8000));
+            REQUIRE_FALSE(mount.axis_running(2));
 
             const double moved_deg = std::abs(mount.axis_degrees(2) - before);
             const double expected_deg = rate_deg_per_sec * duration / 1000.0;

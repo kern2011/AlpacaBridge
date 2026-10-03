@@ -99,6 +99,8 @@ if(TARGET alpacacore_skywatcher)
     # Altitude floor / meridian limit: goto target check over the fake mount
     # (open-astro#436).
     list(APPEND TEST_SOURCES test_skywatcher_motion_limits.cpp)
+    # EQ-AL55i Pro (0x09) Dec pulse guide as a position move (open-astro#666).
+    list(APPEND TEST_SOURCES test_skywatcher_dec_guide_goto.cpp)
     # Telescope [stress] coverage over the loopback UDP fake (issue #271).
     list(APPEND TEST_SOURCES test_skywatcher_concurrency_stress.cpp)
     # Async slew failure surfaces through Slewing (issue #575).

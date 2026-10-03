@@ -384,6 +384,19 @@ public:
         return static_cast<uint32_t>(ax(axis).t1);
     }
 
+    /// Force the next @p n ":f" status replies on an axis to report the running
+    /// bit SET while the axis is in GOTO mode (open-astro#666 Dec position-move
+    /// guide): models a controller that has not yet cleared its running flag
+    /// after a GOTO lands. The guide move's "duration elapsed AND ':f' stopped"
+    /// hold then only ends at its hard cap, so a test can prove the cap bounds
+    /// IsPulseGuiding without the axis ever reporting stopped. Scoped to GOTO
+    /// mode (speed_mode false) so it never traps the dispatch stop-wait, which
+    /// runs on the idle, speed-mode axis before the goto is commanded.
+    void force_running_reads(int axis, int n) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        ax(axis).force_running_reads = n;
+    }
+
     /// Move the simulated axes instantly (test setup).
     void jump_axis_degrees(int axis, double deg) {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -430,6 +443,7 @@ private:
         int stall_live_rate_writes = 0;     // ":I" writes on a running axis to store but not apply (test knob)
         int ignore_start_relatches = 0;     // ":J" kicks on a running axis that must NOT re-latch T1 (test knob)
         int reject_starts = 0;              // ":J" to refuse with "!2" (test knob)
+        int force_running_reads = 0;        // ":f" replies to force the running bit set (test knob)
         int64_t home_index_counts = kHome;
         // Set from the injected clock in the constructor.
         std::chrono::steady_clock::time_point last{};
@@ -590,7 +604,12 @@ private:
             case 'f': {
                 static const char* hex = "0123456789ABCDEF";
                 uint32_t n0 = (a.speed_mode ? 1u : 0u) | (a.dir == '1' ? 2u : 0u) | (a.fast ? 4u : 0u);
-                uint32_t n1 = a.running ? 1u : 0u;
+                bool report_running = a.running;
+                if (a.force_running_reads > 0 && !a.speed_mode) {
+                    --a.force_running_reads;
+                    report_running = true;  // GOTO-mode controller not yet clearing its running flag (test knob)
+                }
+                uint32_t n1 = report_running ? 1u : 0u;
                 uint32_t n2 = a.init_done ? 1u : 0u;
                 std::string out = "=";
                 out += hex[n0];

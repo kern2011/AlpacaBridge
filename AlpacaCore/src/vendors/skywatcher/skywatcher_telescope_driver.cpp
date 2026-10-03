@@ -101,6 +101,18 @@ constexpr bool live_rate_change_needs_relatch(std::uint8_t mount_code) { return 
 // board that could not be identified.
 constexpr bool step_period_readback_usable(std::uint8_t mount_code) { return mount_code != 0x09; }
 
+// open-astro#666: whether a Declination pulse guide is issued as a classic
+// position move (a one-axis GOTO) instead of the timed speed-mode rate nudge.
+// The EQ-AL55i Pro (0x09) applies a bare in-place ":I" but pays a measured
+// ~2-count encoder step on every ":J" re-latch (see live_rate_change_needs_relatch
+// above), which put ConformU's guide pulses outside tolerance; a GOTO lets the
+// controller manage the short move with its own ramp instead, with no live-rate
+// re-latch on the tracking axis. Gated on the mount code alone, true for 0x09
+// only. Every other board keeps the speed-mode rate pulse. Add a board only on
+// the same evidence (a measured ":J" step plus a guide-pulse accuracy problem
+// the position move fixes).
+constexpr bool dec_guide_uses_position_move(std::uint8_t mount_code) { return mount_code == 0x09; }
+
 constexpr uint32_t kCountsMask = 0xFFFFFF;
 constexpr double kSiderealDegPerSec = 360.0 / 86164.0905;
 constexpr double kDefaultGuideRateDegPerSec = 0.5 * kSiderealDegPerSec;
@@ -449,6 +461,7 @@ public:
                                                   board.firmware_version);
                 dec_axis_sense_ = measured_dec_axis_sense(board.mount_code);  // open-astro#458
                 live_rate_relatch_ = live_rate_change_needs_relatch(board.mount_code);  // open-astro#666
+                dec_guide_position_move_ = dec_guide_uses_position_move(board.mount_code);  // open-astro#666
                 if (!step_period_readback_usable(board.mount_code)) {                   // open-astro#686
                     protocol.disable_step_period_readback();
                     ALPACA_LOG_INFO("SkyWatcher",
@@ -1349,6 +1362,11 @@ public:
         double ra_pulse_rate_deg_per_sec = 0.0;
         double ra_restore_rate_deg_per_sec = kSiderealDegPerSec;
         std::uint64_t my_seq = 0;  // this pulse's pulse_seq_[axis-1], taken under the dispatch lock
+        // open-astro#666: on a position-move board (0x09) an idle Dec axis is
+        // guided with a one-axis GOTO instead of the speed-mode rate nudge.
+        bool dec_goto = false;
+        bool dec_goto_skip = false;  // rounds to zero counts: send nothing, hold the pulse normally
+        double dec_goto_target_deg = 0.0;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             check_connected();
@@ -1382,6 +1400,33 @@ public:
                 // wrong way.
                 if ((branch_from_axis_locked(cached_dec_axis_deg_) > 0) != hemisphere_south_locked()) {
                     dec_rate_deg_per_sec = -dec_rate_deg_per_sec;
+                }
+                // open-astro#666: on a position-move board, guide an IDLE Dec
+                // axis with a one-axis GOTO. Fall back to the speed-mode rate
+                // nudge above when a DeclinationRate offset is running or the
+                // axis is otherwise owned -- a GOTO would fight that motion or
+                // lose the offset. The axis direction is the SIGN already
+                // computed above, so hemisphere / pier side /
+                // measured_dec_axis_sense handling is identical to the rate
+                // pulse; only the delivery changes.
+                dec_goto = dec_guide_position_move_ && dec_rate_arcsec_per_sec_ == 0.0 && !goto_in_progress_ &&
+                           !parking_ && !homing_ && !slewing_cached_ && !manual_axis_slewing_[kAxisDec - 1];
+                if (dec_goto) {
+                    const uint32_t cpr_dec = axis_params_[kAxisDec - 1].counts_per_revolution;
+                    // Distance = current Dec guide rate x duration, converted
+                    // with the Dec counts-per-rev and rounded to the nearest
+                    // count. |dec_rate_deg_per_sec| is exactly guide_rate_.dec.
+                    const long dist_counts =
+                        std::lround(std::abs(dec_rate_deg_per_sec) * (static_cast<double>(duration) / 1000.0) *
+                                    static_cast<double>(cpr_dec) / 360.0);
+                    if (dist_counts == 0) {
+                        dec_goto_skip = true;  // sub-count move: send nothing, still run the pulse
+                    } else {
+                        const double sign = dec_rate_deg_per_sec >= 0.0 ? 1.0 : -1.0;
+                        dec_goto_target_deg =
+                            cached_dec_axis_deg_ + sign * (static_cast<double>(dist_counts) * 360.0 /
+                                                           static_cast<double>(cpr_dec));
+                    }
                 }
             } else {
                 // East/West: adjust the RA tracking rate for the pulse window
@@ -1441,8 +1486,12 @@ public:
         const double dec_rate = dec_rate_deg_per_sec;
         const double ra_pulse_rate = ra_pulse_rate_deg_per_sec;
         const bool pulse_restart = ra_pulse_restart;
+        const bool dec_goto_move = dec_goto;              // open-astro#666
+        const bool dec_goto_zero = dec_goto_skip;         // open-astro#666
+        const double dec_goto_target = dec_goto_target_deg;  // open-astro#666
         pulse_task_thread_[ai] = std::thread([this, axis, ai, duration, restore_tracking, direction, dec_rate,
-                                              ra_pulse_rate, ra_restore_rate_deg_per_sec, pulse_restart, my_seq]() {
+                                              ra_pulse_rate, ra_restore_rate_deg_per_sec, pulse_restart, my_seq,
+                                              dec_goto_move, dec_goto_zero, dec_goto_target]() {
             // open-astro#559: a task clears pulse state only while its pulse
             // is still the current one. A superseding pulse sets both flags
             // before it reaps this task, and this task's exit used to clear
@@ -1453,6 +1502,80 @@ public:
                     pulse_axis_in_motion_[ai] = false;
                 }
             };
+            // open-astro#666: Dec position-move guide (EQ-AL55i Pro, 0x09). A
+            // one-axis GOTO replaces the speed-mode nudge + timed stop. The axis
+            // is left in GOTO mode when the move lands; the next MoveAxis / slew
+            // / rate pulse / DeclinationRate change re-establishes its mode
+            // through stop_axis_and_wait_locked() + set_motion_mode(), so no
+            // explicit restore is needed here.
+            if (axis == kAxisDec && dec_goto_move) {
+                if (!dec_goto_zero) {
+                    try {
+                        std::unique_lock<std::mutex> lock(mutex_);
+                        dispatch_dec_guide_goto_locked(lock, dec_goto_target);
+                    } catch (const std::exception& e) {
+                        ALPACA_LOG_WARN("SkyWatcher", std::string("Dec guide move dispatch failed: ") + e.what());
+                        std::lock_guard<std::mutex> lock(mutex_);
+                        end_pulse_locked();
+                        return;
+                    } catch (...) {
+                        ALPACA_LOG_WARN("SkyWatcher", "Dec guide move dispatch failed with unknown exception");
+                        std::lock_guard<std::mutex> lock(mutex_);
+                        end_pulse_locked();
+                        return;
+                    }
+                }
+                // IsPulseGuiding stays true until the requested duration has
+                // elapsed AND ":f" reports the Dec axis stopped, bounded by a
+                // hard cap (kAxisStopTimeout). We deliberately do NOT wait for
+                // the post-stop count creep -- the running bit clearing is the
+                // signal, matching the rate pulse's "duration then stop" shape
+                // for the client-visible IsPulseGuiding window. A CANCELLED
+                // pulse must not touch the hardware: the reaper (a new pulse /
+                // slew / park / home / MoveAxis / abort / disconnect) stops or
+                // re-commands the axis itself.
+                if (!task_wait_for(std::chrono::milliseconds(duration), pulse_task_cancel_[ai])) {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    end_pulse_locked();
+                    return;
+                }
+                if (!dec_goto_zero) {
+                    auto& proto = *protocol_;
+                    const auto cap_deadline = clock_.now() + kAxisStopTimeout;
+                    while (clock_.now() < cap_deadline) {
+                        bool stopped = false;
+                        try {  // unlocked poll: never hold mutex_ across board I/O (issue #212)
+                            stopped = !proto.inquire_status(kAxisDec).running;
+                        } catch (...) {  // NOLINT(bugprone-empty-catch) transient poll failure; retry until the cap
+                        }
+                        if (stopped) {
+                            break;
+                        }
+                        if (!task_wait_for(std::chrono::milliseconds(50), pulse_task_cancel_[ai])) {
+                            std::lock_guard<std::mutex> lock(mutex_);
+                            end_pulse_locked();
+                            return;
+                        }
+                    }
+                }
+                std::unique_lock<std::mutex> lock(mutex_);
+                invalidate_position_cache_locked();
+                cmd_axis_rate_deg_s_[kAxisDec - 1] = 0.0;
+                // A DeclinationRate write that landed during the move deferred to
+                // this restore (busy-axis skip); re-apply it now, exactly as the
+                // rate pulse's stop_axis() tail does.
+                if (tracking_ && dec_rate_arcsec_per_sec_ != 0.0) {
+                    try {
+                        apply_dec_rate_offset_locked(lock);
+                    } catch (const std::exception& e) {
+                        ALPACA_LOG_WARN("SkyWatcher",
+                                        std::string("Dec guide move end: failed to restore Dec rate offset: ") +
+                                            e.what());
+                    }
+                }
+                end_pulse_locked();
+                return;
+            }
             // PulseGuide is an asynchronous initiator (ITelescopeV4): the axis
             // dispatch (which can stop-and-wait a ramping axis, plus UDP
             // retries) runs here so pulse_guide() returns inside the STANDARD
@@ -3672,6 +3795,31 @@ private:
         invalidate_position_cache_locked();
     }
 
+    // open-astro#666: a Declination pulse guide as a classic position move on a
+    // board that uses them (EQ-AL55i Pro, 0x09). This is the SAME command
+    // sequence the slew path uses in dispatch_goto_locked(), scoped to the Dec
+    // axis so the RA axis keeps tracking: ":K" + wait if moving, ":G" goto mode
+    // '0' (the controller manages the ramp and brake point, same as the slew),
+    // ":S" absolute target, ":J" start. No new protocol code. The branch memory
+    // is deliberately NOT updated -- a small guide nudge is not a branch command,
+    // unlike dispatch_goto_locked()'s remember_command_branch_locked().
+    void dispatch_dec_guide_goto_locked(std::unique_lock<std::mutex>& lock, double target_dec_axis_deg) {
+        auto& protocol = *protocol_;
+        const uint64_t gen = ++motion_generation_;
+        // ":K" + wait if the Dec axis is moving (idle on this path, but the slew
+        // sequence always stops first). RA is untouched, so it keeps tracking.
+        if (!stop_axis_and_wait_locked(lock, kAxisDec, gen)) {
+            throw AlpacaException("Dec guide move superseded before dispatch");
+        }
+        refresh_position_cache_locked(true);
+        const double delta = target_dec_axis_deg - cached_dec_axis_deg_;
+        protocol.set_motion_mode(kAxisDec, '0', direction_char(delta));
+        protocol.set_goto_target(
+            kAxisDec, degrees_to_counts(target_dec_axis_deg, axis_params_[kAxisDec - 1].counts_per_revolution));
+        protocol.start_motion(kAxisDec);
+        cmd_axis_rate_deg_s_[kAxisDec - 1] = 0.0;
+    }
+
     void dispatch_goto_locked(std::unique_lock<std::mutex>& lock, double target_ra_axis_deg,
                               double target_dec_axis_deg) {
         auto& protocol = *protocol_;
@@ -4079,7 +4227,13 @@ private:
             // Trust the controller's status register: a GOTO is in progress
             // while either axis is running in GOTO mode. A tracking axis
             // (speed mode) is NOT slewing.
-            slewing_cached_ = (ra.running && !ra.speed_mode) || (dec.running && !dec.speed_mode);
+            // open-astro#666: a Dec position-move guide runs the axis in GOTO
+            // mode, so exclude an axis a pulse owns -- a guide move is not a
+            // slew. This is a no-op for every speed-mode pulse (the ra/dec
+            // ".running && !.speed_mode" term is already false there), so it
+            // changes nothing on any board that keeps the rate pulse.
+            slewing_cached_ = (ra.running && !ra.speed_mode && !pulse_axis_in_motion_[0]) ||
+                              (dec.running && !dec.speed_mode && !pulse_axis_in_motion_[1]);
             last_slewing_poll_ = std::chrono::steady_clock::now();
         } catch (...) {
             // Keep last known state across a transient poll failure, but a
@@ -4615,6 +4769,9 @@ private:
     // true when unknown. Atomic because the pulse task's restore reads it
     // without mutex_.
     std::atomic<bool> live_rate_relatch_{true};
+    // open-astro#666: dec_guide_uses_position_move() of the connected board.
+    // Read under mutex_ at pulse dispatch, so a plain bool suffices.
+    bool dec_guide_position_move_ = false;
     mutable bool position_cache_valid_ = false;
     // open-astro#505: set when a recovered link turned out to belong to a
     // board that had restarted (init_done cleared, position registers reset).

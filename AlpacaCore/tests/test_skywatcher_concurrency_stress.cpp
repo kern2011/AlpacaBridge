@@ -55,6 +55,8 @@ std::unique_ptr<alpacacore::TelescopeDriver> make_driver(const FakeSkyWatcherMou
     return sw::create_skywatcher_telescope(0, endpoint(mount), 39.7392, -104.9903, 1609.0);
 }
 
+using alpacacore::test::FakeMountProfile;
+
 // Hammers every worker thread the driver's disconnect/destructor path must
 // join: slew_task_thread_, pulse_task_thread_, both per-axis
 // stop_task_thread_[axis] (MoveAxis stops issued close together — the exact
@@ -128,6 +130,37 @@ TEST_CASE("SkyWatcher telescope - concurrent connect/disconnect/slew/pulse/movea
     // code, and DriverException where the simulator's canned replies cannot
     // answer. A real defect shows up as a code outside this set, and
     // guard.report() names every distinct one it saw.
+    alpacacore::test::StressCallGuard guard{
+        alpacacore::AlpacaError::NotConnected, alpacacore::AlpacaError::InvalidValue,
+        alpacacore::AlpacaError::InvalidOperation, alpacacore::AlpacaError::NotImplemented,
+        alpacacore::AlpacaError::DriverException};
+    alpacacore::test::run_lifecycle_stress(*driver, [&guard](AlpacaDriver& d) { skywatcher_operate(guard, d); });
+
+    REQUIRE(alpacacore::test::settle_connected(*driver, false, std::chrono::seconds(10)));
+    CHECK(driver->get_connected() == false);
+
+    INFO(guard.report());
+    CHECK(guard.unexpected_count() == 0);
+    CHECK(guard.total_calls() > 0);
+}
+
+// open-astro#666: the same storm on the EQ-AL55i Pro (mount code 0x09), whose
+// Dec pulse guide is a position move (a one-axis GOTO) rather than the
+// speed-mode rate nudge the Wave takes above. The operate callback's
+// pulse_guide(0, ...) therefore spawns and races the goto-dispatch + ":f"-stop
+// hold path under disconnect/destruction, which the Wave registration never
+// exercises. (The stress gate keys on vendor/device-type, so this second
+// skywatcher/telescope case is extra coverage, not a separate pair.)
+TEST_CASE("SkyWatcher telescope - concurrent connect/disconnect/slew/pulse/moveaxis stress on the EQ-AL55i Pro (#666)",
+          "[skywatcher][telescope][stress]") {
+    FakeSkyWatcherMount mount(FakeMountProfile::eq_al55i());
+    REQUIRE(mount.ok());
+    mount.set_stop_ramp_ms(200);
+    auto driver = make_driver(mount);
+
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+    driver->set_connected(false);
+
     alpacacore::test::StressCallGuard guard{
         alpacacore::AlpacaError::NotConnected, alpacacore::AlpacaError::InvalidValue,
         alpacacore::AlpacaError::InvalidOperation, alpacacore::AlpacaError::NotImplemented,
