@@ -93,6 +93,20 @@ TEST_CASE("SkyWatcher serial - a mis-paired OK reply is rejected and the command
     REQUIRE(link.board.count_frames('j') == 2);  // rejected once, resent once
 }
 
+TEST_CASE("SkyWatcher serial - a malformed (byte-dropped) reply is resent and recovers", "[skywatcher][serial]") {
+    // A reply with a dropped byte ("25278", neither "=" nor "!") is not a valid
+    // answer. Before this change it threw immediately and failed the whole
+    // operation. Slew-time link noise on the EQ-AL55i Pro (worst with a ground
+    // loop between separate 12 V supplies; rare but present even with a common
+    // ground) produces these, so -- like a mis-paired reply -- the wrapper now
+    // settles and resends once, recovering the clean reply.
+    SerialLink link(300);
+    link.board.set_counts(1, 0x8000FF);
+    link.board.malform_next();
+    REQUIRE(link.proto.inquire_position(1) == 0x8000FF);
+    REQUIRE(link.board.count_frames('j') == 2);  // rejected once, resent once
+}
+
 TEST_CASE("SkyWatcher serial - giving up on a second mis-pair still settles the line", "[skywatcher][serial]") {
     // send_command settles the link before its one resend. It must also
     // settle before it gives up on a second mis-pair: the stale frame behind

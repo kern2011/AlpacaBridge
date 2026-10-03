@@ -11,6 +11,11 @@
   never park regardless of the tty's `VMIN`/`VTIME` (or a spurious `poll()` readable):
   a quiet board now times out and retransmits as intended instead of hanging. Other
   serial vendors are unchanged.
+- **Sky-Watcher: a byte-dropped (malformed) serial reply is resent, not failed** (AlpacaCore):
+  slew-time electrical noise on the EQ-AL55i Pro's CDC-ACM link occasionally corrupts a
+  reply (a dropped byte, e.g. a truncated `:j1` "25278"); the wrapper now settles and
+  resends once -- the same recovery it already used for a mis-paired reply -- instead of
+  throwing and failing the whole operation. A `!` board rejection is still never resent.
 
 ### Added (tests)
 - **Sky-Watcher serial: a read that ignores its timeout cannot wedge the link settle**

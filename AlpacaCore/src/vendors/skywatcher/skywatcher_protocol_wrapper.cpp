@@ -1609,28 +1609,39 @@ std::string SkyWatcherProtocolWrapper::send_command(char command, int axis, cons
         if (trace_enabled()) {
             ALPACA_LOG_TRACE("SkyWatcher", "MC " + frame.substr(0, frame.size() - 1) + " -> " + reply);
         }
-        // Shape check: an OK reply whose data length does not match the
-        // command is a reply to SOMETHING ELSE (a late frame from a timed-out
-        // exchange). Accepting it would report success for a command the
-        // board may never have applied. Settle the link and resend once.
-        const bool mispaired = expected_len >= 0 && !reply.empty() && reply[0] == kReplyOk &&
-                               static_cast<int>(reply.size()) - 1 != expected_len;
-        if (!mispaired) {
+        // Resend once on any reply that is not a clean, expected-shape answer:
+        //   - MIS-PAIRED: an OK ("=") reply of the wrong data length for the
+        //     command -- a reply to SOMETHING ELSE (a late frame from a
+        //     timed-out exchange). Accepting it would report success for a
+        //     command the board may never have applied (PR #245).
+        //   - MALFORMED: a reply that is neither "=" nor "!", e.g. a truncated
+        //     ":j1" "25278" that dropped a byte. Slew-time EMI on the EQ-AL55i
+        //     Pro's CDC-ACM link corrupts a reply now and then (worst with a
+        //     ground loop between separate 12 V supplies; rare but present even
+        //     with a common ground), and a single resend recovers it instead of
+        //     failing the whole operation (open-astro#<serial>).
+        // A "!" error is a genuine board rejection and is NEVER resent.
+        const bool is_ok = !reply.empty() && reply[0] == kReplyOk;
+        const bool is_error = !reply.empty() && reply[0] == kReplyError;
+        const bool mispaired = is_ok && expected_len >= 0 && static_cast<int>(reply.size()) - 1 != expected_len;
+        const bool malformed = !reply.empty() && !is_ok && !is_error;
+        if (!mispaired && !malformed) {
             break;
         }
-        ALPACA_LOG_WARN("SkyWatcher", "Mis-paired reply to '" + frame.substr(0, frame.size() - 1) + "': got '" + reply +
-                                          "' (expected " + std::to_string(expected_len) +
-                                          " data chars); settling the link and " +
-                                          (attempt == 0 ? "resending" : "giving up"));
-        // Settle before the resend AND before giving up: a mis-pair means a
-        // stale frame is (or was just) in flight, and a caller that catches
-        // the exception and carries on would otherwise have its next
-        // exchange answered by the straggler -- a same-shaped one passes
+        ALPACA_LOG_WARN("SkyWatcher", std::string(malformed ? "Malformed" : "Mis-paired") + " reply to '" +
+                                          frame.substr(0, frame.size() - 1) + "': got '" + reply + "'" +
+                                          (mispaired ? " (expected " + std::to_string(expected_len) + " data chars)" : "") +
+                                          "; settling the link and " + (attempt == 0 ? "resending" : "giving up"));
+        // Settle before the resend AND before giving up: a corrupt/mis-paired
+        // reply means a stale or partial frame is (or was just) in flight, and a
+        // caller that catches the exception and carries on would otherwise have
+        // its next exchange answered by the straggler -- a same-shaped one passes
         // the shape check (PR #245 review).
         pimpl_->settle_after_mispair();
         if (attempt > 0) {
-            throw AlpacaException("Mis-paired motor controller reply to '" + std::string(1, command) +
-                                  std::to_string(axis) + "': '" + reply + "'");
+            throw AlpacaException(std::string(malformed ? "Malformed" : "Mis-paired") +
+                                  " motor controller reply to '" + std::string(1, command) + std::to_string(axis) +
+                                  "': '" + reply + "'");
         }
     }
     if (!reply.empty() && reply[0] == kReplyOk) {
