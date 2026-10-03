@@ -1008,7 +1008,18 @@ private:
             alpacacore::util::mark_serial_port_closed(registry_key);
             return false;
         }
-        if (!util::clear_nonblocking(serial_fd_)) {
+        // Keep the fd NON-blocking (it was opened O_NONBLOCK) and drive every
+        // read through poll() (see poll_serial_readable / exchange_serial /
+        // settle_serial). The EQ-AL55i Pro's STM32 CDC-ACM virtual COM port does
+        // NOT honour VMIN/VTIME as a read timeout -- a blocking read(fd,&ch,1) on
+        // a quiet board parked forever in n_tty_read and wedged the driver (gdb
+        // on the rig). It also returns a spurious poll() "readable" after which a
+        // blocking read still parks, so poll alone is not enough: the read must
+        // be non-blocking so it returns EAGAIN instead of parking, bounded by the
+        // poll deadline. write_all() already tolerates EAGAIN via its own
+        // deadline loop. (The other serial vendors keep clear_nonblocking + VTIME;
+        // this is a Sky-Watcher-specific hardening for a tty that ignores VTIME.)
+        if (!util::set_nonblocking(serial_fd_)) {
             close(serial_fd_);
             serial_fd_ = -1;
             alpacacore::util::mark_serial_port_closed(registry_key);
@@ -1100,18 +1111,58 @@ private:
     // shape check in send_command cannot tell it apart either (pty-backed
     // regression in test_skywatcher_serial.cpp). Replies later than the
     // window are only caught when their shape differs.
+    // Wait up to budget_ms for the serial fd to have data. Returns >0 readable,
+    // 0 timed out, <0 poll error (errno set). poll() bounds the wait on the fd
+    // ITSELF, independent of the tty's VMIN/VTIME -- a USB CDC-ACM port (the
+    // EQ-AL55i Pro's STM32 virtual COM port) does NOT honour VTIME as a read
+    // timeout, so a bare read(fd,&ch,1) on a board that went quiet after a
+    // mis-paired reply parked forever in n_tty_read, holding io_mutex_ (and the
+    // driver mutex_ above it) and wedging the whole server until it was killed.
+    // Diagnosed by gdb on the rig: a worker stuck in settle_serial -> read with
+    // every other worker blocked on the driver mutex; /proc/<tid>/syscall = read,
+    // wchan = n_tty_read. poll() never relies on VTIME, so the caller's deadline
+    // is always enforced, on every tty.
+    int poll_serial_readable(int budget_ms) {
+#ifndef _WIN32
+        struct pollfd pfd;
+        pfd.fd = serial_fd_;
+        pfd.events = POLLIN;
+        pfd.revents = 0;
+        return ::poll(&pfd, 1, budget_ms);
+#else
+        (void)budget_ms;
+        return 0;
+#endif
+    }
+
     void settle_serial(int window_ms) {
 #ifndef _WIN32
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(window_ms);
-        while (std::chrono::steady_clock::now() < deadline) {
+        for (;;) {
+            const auto remaining =
+                std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now())
+                    .count();
+            if (remaining <= 0) {
+                break;
+            }
+            // Poll for the WHOLE remaining window so a late reply that has not
+            // STARTED arriving yet is still absorbed (the original behaviour),
+            // but without ever parking a bare read() past the deadline.
+            const int pr = poll_serial_readable(static_cast<int>(remaining));
+            if (pr <= 0) {
+                break;  // quiet for the rest of the window (or poll error): drained
+            }
             char ch = 0;
-            ssize_t r = read(serial_fd_, &ch, 1);  // NOLINT(clang-analyzer-unix.BlockInCriticalSection)
+            // Same injectable read seam as exchange_serial, so the poll bound is
+            // testable on the path that actually wedged on the rig.
+            const ssize_t r = serial_read_ ? serial_read_(serial_fd_, &ch, 1)
+                                           : read(serial_fd_, &ch, 1);  // data is ready: returns at once
             if (r == 1) {
                 // open-astro#505: a late reply being absorbed is still proof
                 // the board is answering, so it must not count toward silence.
                 exchange_saw_frame_ = true;
             } else {
-                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+                break;  // EOF / EAGAIN: nothing more to drain this instant
             }
         }
         tcflush(serial_fd_, TCIFLUSH);
@@ -1152,11 +1203,35 @@ private:
             std::string reply;
             auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
             while (std::chrono::steady_clock::now() < deadline) {
+                const auto remaining =
+                    std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now())
+                        .count();
+                if (remaining <= 0) {
+                    break;
+                }
+                // Serialized transport: one in-flight command per link. Wait for
+                // the reply on the fd ITSELF, never on VMIN/VTIME -- a USB
+                // CDC-ACM port does not honour VTIME as a read timeout, so a bare
+                // read() on a board that went quiet mid-reply parked forever in
+                // n_tty_read (see poll_serial_readable). poll() keeps the whole
+                // exchange bounded by timeout_ms and ends the quiet-tty spin.
+                const int pr = poll_serial_readable(static_cast<int>(remaining));
+                if (pr == 0) {
+                    break;  // no (more) reply within the timeout
+                }
+                if (pr < 0) {
+                    if (errno == EINTR) {
+                        continue;
+                    }
+                    const int err = errno;
+                    if (err == EIO || err == ENXIO || err == ENODEV || err == EBADF || serial_node_removed_locked()) {
+                        lose_serial_link_locked("Serial poll failed: " + util::errno_string(err));
+                    }
+                    throw AlpacaException("Serial poll failed: " + util::errno_string(err));
+                }
                 char ch = 0;
-                // Serialized transport: one in-flight command per link, bounded by VTIME.
-                const auto r = serial_read_
-                                   ? serial_read_(serial_fd_, &ch, 1)
-                                   : ::read(serial_fd_, &ch, 1);  // NOLINT(clang-analyzer-unix.BlockInCriticalSection)
+                const auto r = serial_read_ ? serial_read_(serial_fd_, &ch, 1)
+                                            : ::read(serial_fd_, &ch, 1);  // readable: returns at once
                 if (r == 1) {
                     exchange_saw_frame_ = true;  // open-astro#505: the board is talking
                     if (ch == kFrameEnd) {
@@ -1174,9 +1249,11 @@ private:
                     }
                     throw AlpacaException("Serial read failed: " + util::errno_string(err));
                 } else {
-                    // VTIME paces a quiet tty, but EOF and nonblocking retries can
-                    // return immediately. Preserve the deadline without burning a
-                    // core while the node still exists (zero alone is not loss).
+                    // poll() reported readable but the read made no progress (EOF,
+                    // EAGAIN, or a read that does not consume the pending byte):
+                    // pace by 1 ms so this cannot spin the core, bounded by the
+                    // deadline, exactly as the pre-poll loop did. The quiet-board
+                    // wedge is handled by poll() returning 0 above, not here.
                     std::this_thread::sleep_until(
                         std::min(deadline, std::chrono::steady_clock::now() + std::chrono::milliseconds(1)));
                 }

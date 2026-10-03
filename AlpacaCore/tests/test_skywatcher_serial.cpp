@@ -114,6 +114,52 @@ TEST_CASE("SkyWatcher serial - giving up on a second mis-pair still settles the 
     REQUIRE(link.proto.inquire_position(1) == 0x812345);
 }
 
+TEST_CASE("SkyWatcher serial - a read that ignores its timeout cannot wedge the link settle", "[skywatcher][serial]") {
+    // Rig diagnosis (EQ-AL55i Pro, STM32 CDC-ACM): VMIN=0/VTIME=1 did NOT give
+    // read() a timeout when the board went quiet after a mis-paired reply, so
+    // the bare read in settle_serial parked forever in n_tty_read, holding
+    // io_mutex_ and wedging the whole driver (gdb: every worker blocked on the
+    // driver mutex behind the one stuck in settle). A pty honours VTIME, so the
+    // failure is modelled through the read seam: a read that returns data at
+    // once when present but otherwise blocks (here up to 2 s) instead of timing
+    // out. The poll()-bounded settle/exchange must detect the quiet board on the
+    // fd and never enter that read, so the whole operation stays bounded by the
+    // command timeout. Without the fix this exceeds the 2 s model block.
+    FakeSkyWatcherSerialBoard board;
+    auto vtime_ignoring_read = [](int fd, char* buf, std::size_t n) -> std::ptrdiff_t {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        for (;;) {
+            const ssize_t r = ::read(fd, buf, n);
+            if (r > 0) {
+                return r;  // data present: a real tty returns at once here too
+            }
+            if (std::chrono::steady_clock::now() >= deadline) {
+                return 0;  // bounded so a regression cannot hang the suite
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+    };
+    sw::SkyWatcherProtocolWrapper proto{vtime_ignoring_read};
+    sw::ConnectionInfo info;
+    info.type = sw::ConnectionType::Serial;
+    info.port_path = board.slave_path();
+    info.baud_rate = 9600;
+    info.response_timeout_ms = 300;
+    REQUIRE(proto.connect(info));
+
+    board.set_counts(1, 0x8000FF);
+    board.mispair_next();  // the next ":j1" gets a wrong-length reply -> settle, then resend
+    const auto start = std::chrono::steady_clock::now();
+    REQUIRE(proto.inquire_position(1) == 0x8000FF);  // recovers via the resend
+    const auto elapsed =
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start);
+    // Bounded by the 300 ms command timeout + the 200 ms settle window, NOT the
+    // 2 s broken-read model. Before the poll() fix the quiet-board settle read
+    // blocked the full 2 s.
+    CHECK(elapsed < std::chrono::milliseconds(1500));
+    proto.disconnect();
+}
+
 TEST_CASE("SkyWatcher serial - a transient failure of the ':i' readback does not disable the diagnostic",
           "[skywatcher][serial]") {
     // Only an explicit "!0" (Unknown command) means the board has no ":i". A
