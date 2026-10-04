@@ -1155,16 +1155,17 @@ private:
 #endif
     }
 
-    // Write the whole frame on the non-blocking fd, bounded by budget_ms. The fd
-    // is kept O_NONBLOCK for the read-timeout fix (see connect_serial), so write()
-    // can return EAGAIN -- even before the first byte -- when the TX buffer fills
-    // because the board stopped draining. util::write_all only retries EAGAIN after
-    // a PARTIAL write, so it would fail such a frame fast; here we wait for POLLOUT
-    // within the budget instead, the write-side mirror of the poll-bounded reads.
-    // errno is left set on failure for the caller's link-loss classification.
-    bool write_all_bounded(const char* data, std::size_t len, int budget_ms) {
+    // Write the whole frame on the non-blocking fd, bounded by a deadline SHARED
+    // with the reply read that follows (so one exchange stays within timeout_ms,
+    // not up to 2x it -- it matters most for the ":K"/":L" stop path's tight cap).
+    // The fd is kept O_NONBLOCK for the read-timeout fix (see connect_serial), so
+    // write() can return EAGAIN -- even before the first byte -- when the TX buffer
+    // fills because the board stopped draining. util::write_all only retries EAGAIN
+    // after a PARTIAL write, so it would fail such a frame fast; here we wait for
+    // POLLOUT until the deadline instead, the write-side mirror of the poll-bounded
+    // reads. errno is left set on failure for the caller's link-loss classification.
+    bool write_all_bounded(const char* data, std::size_t len, std::chrono::steady_clock::time_point deadline) {
 #ifndef _WIN32
-        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(budget_ms);
         std::size_t total = 0;
         while (total < len) {
             const auto remaining =
@@ -1187,6 +1188,9 @@ private:
             if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
                 const int pr = poll_serial_writable(static_cast<int>(remaining));
                 if (pr < 0) {
+                    if (errno == EINTR) {
+                        continue;  // interrupted: retry, as the read loop does
+                    }
                     return false;  // poll error: errno set by poll()
                 }
                 if (pr == 0) {
@@ -1206,7 +1210,7 @@ private:
 #else
         (void)data;
         (void)len;
-        (void)budget_ms;
+        (void)deadline;
         return false;
 #endif
     }
@@ -1275,7 +1279,10 @@ private:
             } else {
                 tcflush(serial_fd_, TCIFLUSH);
             }
-            if (!write_all_bounded(frame.data(), frame.size(), timeout_ms)) {
+            // One deadline shared by the write and the reply read below, so a
+            // single exchange stays bounded by timeout_ms rather than up to 2x it.
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+            if (!write_all_bounded(frame.data(), frame.size(), deadline)) {
                 const int err = errno;
                 if (err == EIO || err == ENXIO || err == ENODEV || err == EBADF || serial_node_removed_locked()) {
                     lose_serial_link_locked("Serial write failed: " + util::errno_string(err));
@@ -1283,7 +1290,6 @@ private:
                 throw AlpacaException("Serial write failed: " + util::errno_string(err));
             }
             std::string reply;
-            auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
             while (std::chrono::steady_clock::now() < deadline) {
                 const auto remaining =
                     std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now())
@@ -1709,6 +1715,10 @@ std::string SkyWatcherProtocolWrapper::send_command(char command, int axis, cons
         // are idempotent in practice (re-issuing the same target/mode/start is a
         // no-op or a harmless repeat) -- and it is the shared serial+UDP path, so
         // the recovery applies on both transports.
+        // TODO: a resend of a motion command whose FIRST frame was applied can draw
+        // a "!" rejection (e.g. ":J" -> "motor not stopped"), surfacing as
+        // MotorControllerRejected on a move that actually started. If that proves to
+        // matter on a bench, limit the malformed/mis-pair resend to inquiry commands.
         const bool is_ok = !reply.empty() && reply[0] == kReplyOk;
         const bool is_error = !reply.empty() && reply[0] == kReplyError;
         const bool mispaired = is_ok && expected_len >= 0 && static_cast<int>(reply.size()) - 1 != expected_len;

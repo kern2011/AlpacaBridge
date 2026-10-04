@@ -174,6 +174,16 @@ TEST_CASE("SkyWatcher serial - a quiet board times out within the command budget
     // WITH the fix: ~response_timeout (300 ms). WITHOUT it: >= the 2 s broken-read
     // block. The 1500 ms bound fails on the base code and passes on the fix.
     CHECK(elapsed < std::chrono::milliseconds(1500));
+
+    // The first timeout set serial_dirty_, so a second call (still muted) runs
+    // settle_serial(200) BEFORE its write -- exercising the broken read on the
+    // SETTLE path too, not just exchange. It must also stay bounded; without the
+    // settle poll() gate it would block the seam's full 2 s inside settle_serial.
+    const auto start2 = std::chrono::steady_clock::now();
+    REQUIRE_THROWS_AS(proto.inquire_position(1), alpacacore::AlpacaException);
+    const auto elapsed2 =
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start2);
+    CHECK(elapsed2 < std::chrono::milliseconds(1500));
     proto.disconnect();
 }
 
