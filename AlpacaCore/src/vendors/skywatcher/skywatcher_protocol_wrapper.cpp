@@ -1126,7 +1126,7 @@ private:
     // every tty.
     int poll_serial_readable(int budget_ms) {
 #ifndef _WIN32
-        struct pollfd pfd;
+        struct pollfd pfd{};
         pfd.fd = serial_fd_;
         pfd.events = POLLIN;
         pfd.revents = 0;
@@ -1157,8 +1157,8 @@ private:
             char ch = 0;
             // Same injectable read seam as exchange_serial, so the poll bound is
             // testable on the settle path that is the one that wedged.
-            const ssize_t r = serial_read_ ? serial_read_(serial_fd_, &ch, 1)
-                                           : read(serial_fd_, &ch, 1);  // data is ready: returns at once
+            // NOLINTNEXTLINE(clang-analyzer-unix.BlockInCriticalSection) -- O_NONBLOCK fd, returns at once
+            const ssize_t r = serial_read_ ? serial_read_(serial_fd_, &ch, 1) : read(serial_fd_, &ch, 1);
             if (r == 1) {
                 // open-astro#505: a late reply being absorbed is still proof
                 // the board is answering, so it must not count toward silence.
@@ -1232,8 +1232,8 @@ private:
                     throw AlpacaException("Serial poll failed: " + util::errno_string(err));
                 }
                 char ch = 0;
-                const auto r = serial_read_ ? serial_read_(serial_fd_, &ch, 1)
-                                            : ::read(serial_fd_, &ch, 1);  // readable: returns at once
+                // NOLINTNEXTLINE(clang-analyzer-unix.BlockInCriticalSection) -- O_NONBLOCK fd, returns at once
+                const auto r = serial_read_ ? serial_read_(serial_fd_, &ch, 1) : ::read(serial_fd_, &ch, 1);
                 if (r == 1) {
                     exchange_saw_frame_ = true;  // open-astro#505: the board is talking
                     if (ch == kFrameEnd) {
@@ -1628,10 +1628,11 @@ std::string SkyWatcherProtocolWrapper::send_command(char command, int axis, cons
         if (!mispaired && !malformed) {
             break;
         }
-        ALPACA_LOG_WARN("SkyWatcher", std::string(malformed ? "Malformed" : "Mis-paired") + " reply to '" +
-                                          frame.substr(0, frame.size() - 1) + "': got '" + reply + "'" +
-                                          (mispaired ? " (expected " + std::to_string(expected_len) + " data chars)" : "") +
-                                          "; settling the link and " + (attempt == 0 ? "resending" : "giving up"));
+        ALPACA_LOG_WARN("SkyWatcher",
+                        std::string(malformed ? "Malformed" : "Mis-paired") + " reply to '" +
+                            frame.substr(0, frame.size() - 1) + "': got '" + reply + "'" +
+                            (mispaired ? " (expected " + std::to_string(expected_len) + " data chars)" : "") +
+                            "; settling the link and " + (attempt == 0 ? "resending" : "giving up"));
         // Settle before the resend AND before giving up: a corrupt/mis-paired
         // reply means a stale or partial frame is (or was just) in flight, and a
         // caller that catches the exception and carries on would otherwise have
@@ -1639,9 +1640,8 @@ std::string SkyWatcherProtocolWrapper::send_command(char command, int axis, cons
         // the shape check (PR #245 review).
         pimpl_->settle_after_mispair();
         if (attempt > 0) {
-            throw AlpacaException(std::string(malformed ? "Malformed" : "Mis-paired") +
-                                  " motor controller reply to '" + std::string(1, command) + std::to_string(axis) +
-                                  "': '" + reply + "'");
+            throw AlpacaException(std::string(malformed ? "Malformed" : "Mis-paired") + " motor controller reply to '" +
+                                  std::string(1, command) + std::to_string(axis) + "': '" + reply + "'");
         }
     }
     if (!reply.empty() && reply[0] == kReplyOk) {
