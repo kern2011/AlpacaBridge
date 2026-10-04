@@ -688,7 +688,8 @@ std::vector<SkyWatcherHostInfo> discover_skywatcher_hosts(int timeout_ms) {
 
 class SkyWatcherProtocolWrapper::Impl {
 public:
-    explicit Impl(SerialRead serial_read) : serial_read_(std::move(serial_read)) {}
+    explicit Impl(SerialRead serial_read, SerialWrite serial_write)
+        : serial_read_(std::move(serial_read)), serial_write_(std::move(serial_write)) {}
 
     ~Impl() { disconnect(); }
 
@@ -1017,10 +1018,13 @@ private:
         // request blocks until the service is killed. Such a port can also return
         // a spurious poll() "readable" after which a blocking read still parks, so
         // poll alone is not enough: the read must be non-blocking so it returns
-        // EAGAIN instead of parking, bounded by the poll deadline. write_all()
-        // already tolerates EAGAIN via its own deadline loop. (The other serial
-        // vendors keep clear_nonblocking + VTIME; this is a Sky-Watcher-specific
-        // hardening for a tty that ignores VTIME.)
+        // EAGAIN instead of parking, bounded by the poll deadline. WRITES on the
+        // same non-blocking fd can likewise hit EAGAIN before the first byte when
+        // the TX buffer fills (util::write_all only retries EAGAIN after a partial
+        // write), so frame sends go through write_all_bounded(), which waits for
+        // POLLOUT within the command budget -- the write-side mirror of the reads.
+        // (The other serial vendors keep clear_nonblocking + VTIME; this is a
+        // Sky-Watcher-specific hardening for a tty that ignores VTIME.)
         if (!util::set_nonblocking(serial_fd_)) {
             close(serial_fd_);
             serial_fd_ = -1;
@@ -1137,6 +1141,76 @@ private:
 #endif
     }
 
+    // Mirror of poll_serial_readable for the write side.
+    int poll_serial_writable(int budget_ms) {
+#ifndef _WIN32
+        struct pollfd pfd {};
+        pfd.fd = serial_fd_;
+        pfd.events = POLLOUT;
+        pfd.revents = 0;
+        return ::poll(&pfd, 1, budget_ms);
+#else
+        (void)budget_ms;
+        return 0;
+#endif
+    }
+
+    // Write the whole frame on the non-blocking fd, bounded by budget_ms. The fd
+    // is kept O_NONBLOCK for the read-timeout fix (see connect_serial), so write()
+    // can return EAGAIN -- even before the first byte -- when the TX buffer fills
+    // because the board stopped draining. util::write_all only retries EAGAIN after
+    // a PARTIAL write, so it would fail such a frame fast; here we wait for POLLOUT
+    // within the budget instead, the write-side mirror of the poll-bounded reads.
+    // errno is left set on failure for the caller's link-loss classification.
+    bool write_all_bounded(const char* data, std::size_t len, int budget_ms) {
+#ifndef _WIN32
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(budget_ms);
+        std::size_t total = 0;
+        while (total < len) {
+            const auto remaining =
+                std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now())
+                    .count();
+            if (remaining <= 0) {
+                errno = EAGAIN;
+                return false;
+            }
+            // NOLINTNEXTLINE(clang-analyzer-unix.BlockInCriticalSection) -- O_NONBLOCK fd, EAGAIN not block
+            const ssize_t n = serial_write_ ? serial_write_(serial_fd_, data + total, len - total)
+                                            : ::write(serial_fd_, data + total, len - total);
+            if (n > 0) {
+                total += static_cast<std::size_t>(n);
+                continue;
+            }
+            if (n < 0 && errno == EINTR) {
+                continue;
+            }
+            if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+                const int pr = poll_serial_writable(static_cast<int>(remaining));
+                if (pr < 0) {
+                    return false;  // poll error: errno set by poll()
+                }
+                if (pr == 0) {
+                    continue;  // timeout: the deadline check above ends the loop
+                }
+                // Writable. A spurious POLLOUT that still EAGAINs next would busy-loop
+                // until the deadline, so yield briefly before retrying.
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                continue;
+            }
+            if (n == 0) {
+                errno = EIO;  // treat a 0 return as a hard error, like util::write_all
+            }
+            return false;
+        }
+        return true;
+#else
+        (void)data;
+        (void)len;
+        (void)budget_ms;
+        return false;
+#endif
+    }
+
     void settle_serial(int window_ms) {
 #ifndef _WIN32
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(window_ms);
@@ -1164,7 +1238,13 @@ private:
                 // the board is answering, so it must not count toward silence.
                 exchange_saw_frame_ = true;
             } else {
-                break;  // EOF / EAGAIN: nothing more to drain this instant
+                // EOF / EAGAIN: nothing more to drain this instant. If poll()
+                // reported the fd readable but the read then yields EAGAIN (a
+                // spurious-readable tty), this ends the drain early rather than
+                // re-polling for the rest of the window; a straggler that arrives
+                // after this point is caught by the mis-paired/malformed shape
+                // check on the next exchange, which is the real backstop.
+                break;
             }
         }
         tcflush(serial_fd_, TCIFLUSH);
@@ -1195,7 +1275,7 @@ private:
             } else {
                 tcflush(serial_fd_, TCIFLUSH);
             }
-            if (!util::write_all(serial_fd_, frame.data(), frame.size())) {
+            if (!write_all_bounded(frame.data(), frame.size(), timeout_ms)) {
                 const int err = errno;
                 if (err == EIO || err == ENXIO || err == ENODEV || err == EBADF || serial_node_removed_locked()) {
                     lose_serial_link_locked("Serial write failed: " + util::errno_string(err));
@@ -1498,6 +1578,7 @@ private:
 #endif
 
     SerialRead serial_read_;
+    SerialWrite serial_write_;
     mutable std::mutex io_mutex_;
     // Written only under io_mutex_; atomic so link_alive() can read it without.
     std::atomic<bool> connected_{false};
@@ -1547,8 +1628,8 @@ private:
 
 // ── Public wrapper API ──────────────────────────────────────────────────────
 
-SkyWatcherProtocolWrapper::SkyWatcherProtocolWrapper(SerialRead serial_read)
-    : pimpl_(std::make_unique<Impl>(std::move(serial_read))) {}
+SkyWatcherProtocolWrapper::SkyWatcherProtocolWrapper(SerialRead serial_read, SerialWrite serial_write)
+    : pimpl_(std::make_unique<Impl>(std::move(serial_read), std::move(serial_write))) {}
 SkyWatcherProtocolWrapper::~SkyWatcherProtocolWrapper() = default;
 
 SkyWatcherProtocolWrapper& SkyWatcherProtocolWrapper::instance() {
@@ -1621,6 +1702,13 @@ std::string SkyWatcherProtocolWrapper::send_command(char command, int axis, cons
         //     link corrupts a reply now and then, and a single resend recovers
         //     it instead of failing the whole operation.
         // A "!" error is a genuine board rejection and is NEVER resent.
+        // This loop also resends a corrupt reply to a SET/motion command
+        // (":G"/":S"/":J"/...), not just an inquiry: the board may already have
+        // applied the first frame, so a resend can double-apply. This is the same
+        // trade-off the mis-pair path already accepted (PR #245) -- these commands
+        // are idempotent in practice (re-issuing the same target/mode/start is a
+        // no-op or a harmless repeat) -- and it is the shared serial+UDP path, so
+        // the recovery applies on both transports.
         const bool is_ok = !reply.empty() && reply[0] == kReplyOk;
         const bool is_error = !reply.empty() && reply[0] == kReplyError;
         const bool mispaired = is_ok && expected_len >= 0 && static_cast<int>(reply.size()) - 1 != expected_len;

@@ -8,14 +8,24 @@
   fd, so a read can never park regardless of the tty's `VMIN`/`VTIME` (or a spurious
   `poll()` readable): a quiet board now times out and retransmits as intended instead of
   hanging. Other serial vendors are unchanged.
-- **Sky-Watcher: a byte-dropped (malformed) serial reply is resent, not failed** (AlpacaCore):
-  electrical noise on a serial link occasionally corrupts a reply (a dropped byte, e.g. a
-  truncated `:j1` "25278"); the wrapper now settles and resends once -- the same recovery it
-  already used for a mis-paired reply -- instead of throwing and failing the whole operation.
-  A `!` board rejection is still never resent.
+- **Sky-Watcher: serial writes no longer fail fast on a full TX buffer** (AlpacaCore):
+  because the fd is kept non-blocking for the read fix above, `write()` can return `EAGAIN`
+  before the first byte when the transmit buffer fills (a board that stopped draining), and
+  `util::write_all` only retries `EAGAIN` after a partial write -- so a command frame would
+  otherwise have failed at once with "Serial write failed: Resource temporarily unavailable".
+  Frame writes now go through a `poll(POLLOUT)`-bounded write that waits within the command
+  budget, the write-side mirror of the poll-bounded reads.
+- **Sky-Watcher: a byte-dropped (malformed) reply is resent, not failed** (AlpacaCore):
+  electrical noise occasionally corrupts a reply (a dropped byte, e.g. a truncated `:j1`
+  "25278"); the wrapper now settles and resends once -- the same recovery it already used for
+  a mis-paired reply -- instead of throwing and failing the whole operation. This applies to
+  both the serial and the UDP (Wi-Fi) transport. A `!` board rejection is still never resent.
 
 ### Added (tests)
-- **Sky-Watcher serial: a read that ignores its timeout cannot wedge the link settle**
-  (AlpacaCore): models a tty that returns data at once when present but otherwise blocks
-  instead of timing out, and asserts the poll-bounded settle/exchange stays within the
-  command timeout.
+- **Sky-Watcher serial: a quiet board times out within the command budget** (AlpacaCore):
+  with the board muted (quiet, healthy fd) and a read seam that blocks when no data is
+  present, the exchange must time out at ~`response_timeout` rather than the seam's block --
+  the test fails on the base `exchange_serial` and passes on the poll-bounded one.
+- **Sky-Watcher serial: a stalled TX buffer (write EAGAIN) is waited out** (AlpacaCore):
+  a write seam reports `EAGAIN` several times before succeeding; the command still completes
+  via the poll-bounded write instead of failing on the first `EAGAIN`.
