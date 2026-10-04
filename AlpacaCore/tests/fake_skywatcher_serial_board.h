@@ -161,9 +161,9 @@ public:
     }
 
     /// Answer the next @p times frames with a MALFORMED reply ("25278" -- no
-    /// leading "=" or "!"), i.e. a reply with a byte dropped on a noisy link
-    /// (observed on the EQ-AL55i Pro CDC-ACM during slews). The wrapper must
-    /// settle and resend rather than fail the command outright.
+    /// leading "=" or "!"), i.e. a reply with a byte dropped on a noisy serial
+    /// link. The wrapper must settle and resend rather than fail the command
+    /// outright.
     void malform_next(int times = 1) {
         std::lock_guard<std::mutex> lock(mutex_);
         malform_left_ = times;

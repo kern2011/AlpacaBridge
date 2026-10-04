@@ -1010,15 +1010,17 @@ private:
         }
         // Keep the fd NON-blocking (it was opened O_NONBLOCK) and drive every
         // read through poll() (see poll_serial_readable / exchange_serial /
-        // settle_serial). The EQ-AL55i Pro's STM32 CDC-ACM virtual COM port does
-        // NOT honour VMIN/VTIME as a read timeout -- a blocking read(fd,&ch,1) on
-        // a quiet board parked forever in n_tty_read and wedged the driver (gdb
-        // on the rig). It also returns a spurious poll() "readable" after which a
-        // blocking read still parks, so poll alone is not enough: the read must
-        // be non-blocking so it returns EAGAIN instead of parking, bounded by the
-        // poll deadline. write_all() already tolerates EAGAIN via its own
-        // deadline loop. (The other serial vendors keep clear_nonblocking + VTIME;
-        // this is a Sky-Watcher-specific hardening for a tty that ignores VTIME.)
+        // settle_serial). Some USB CDC-ACM virtual COM ports do NOT honour
+        // VMIN/VTIME as a read timeout -- a blocking read(fd,&ch,1) on a board
+        // that has gone quiet then parks forever in n_tty_read, and because the
+        // worker holds the I/O mutex (and the driver mutex above it) every Alpaca
+        // request blocks until the service is killed. Such a port can also return
+        // a spurious poll() "readable" after which a blocking read still parks, so
+        // poll alone is not enough: the read must be non-blocking so it returns
+        // EAGAIN instead of parking, bounded by the poll deadline. write_all()
+        // already tolerates EAGAIN via its own deadline loop. (The other serial
+        // vendors keep clear_nonblocking + VTIME; this is a Sky-Watcher-specific
+        // hardening for a tty that ignores VTIME.)
         if (!util::set_nonblocking(serial_fd_)) {
             close(serial_fd_);
             serial_fd_ = -1;
@@ -1113,15 +1115,15 @@ private:
     // window are only caught when their shape differs.
     // Wait up to budget_ms for the serial fd to have data. Returns >0 readable,
     // 0 timed out, <0 poll error (errno set). poll() bounds the wait on the fd
-    // ITSELF, independent of the tty's VMIN/VTIME -- a USB CDC-ACM port (the
-    // EQ-AL55i Pro's STM32 virtual COM port) does NOT honour VTIME as a read
-    // timeout, so a bare read(fd,&ch,1) on a board that went quiet after a
-    // mis-paired reply parked forever in n_tty_read, holding io_mutex_ (and the
-    // driver mutex_ above it) and wedging the whole server until it was killed.
-    // Diagnosed by gdb on the rig: a worker stuck in settle_serial -> read with
-    // every other worker blocked on the driver mutex; /proc/<tid>/syscall = read,
-    // wchan = n_tty_read. poll() never relies on VTIME, so the caller's deadline
-    // is always enforced, on every tty.
+    // ITSELF, independent of the tty's VMIN/VTIME -- some USB CDC-ACM virtual COM
+    // ports do NOT honour VTIME as a read timeout, so a bare read(fd,&ch,1) on a
+    // board that went quiet (mid-exchange, or after a mis-paired reply) parked
+    // forever in n_tty_read, holding io_mutex_ (and the driver mutex_ above it)
+    // and wedging the whole server until it was killed -- observed as a worker
+    // stuck in settle_serial -> read (/proc/<tid>/syscall = read, wchan =
+    // n_tty_read) with every other worker blocked on the driver mutex. poll()
+    // never relies on VTIME, so the caller's deadline is always enforced, on
+    // every tty.
     int poll_serial_readable(int budget_ms) {
 #ifndef _WIN32
         struct pollfd pfd;
@@ -1154,7 +1156,7 @@ private:
             }
             char ch = 0;
             // Same injectable read seam as exchange_serial, so the poll bound is
-            // testable on the path that actually wedged on the rig.
+            // testable on the settle path that is the one that wedged.
             const ssize_t r = serial_read_ ? serial_read_(serial_fd_, &ch, 1)
                                            : read(serial_fd_, &ch, 1);  // data is ready: returns at once
             if (r == 1) {
@@ -1615,11 +1617,9 @@ std::string SkyWatcherProtocolWrapper::send_command(char command, int axis, cons
         //     timed-out exchange). Accepting it would report success for a
         //     command the board may never have applied (PR #245).
         //   - MALFORMED: a reply that is neither "=" nor "!", e.g. a truncated
-        //     ":j1" "25278" that dropped a byte. Slew-time EMI on the EQ-AL55i
-        //     Pro's CDC-ACM link corrupts a reply now and then (worst with a
-        //     ground loop between separate 12 V supplies; rare but present even
-        //     with a common ground), and a single resend recovers it instead of
-        //     failing the whole operation (open-astro#<serial>).
+        //     ":j1" "25278" that dropped a byte. Electrical noise on a serial
+        //     link corrupts a reply now and then, and a single resend recovers
+        //     it instead of failing the whole operation.
         // A "!" error is a genuine board rejection and is NEVER resent.
         const bool is_ok = !reply.empty() && reply[0] == kReplyOk;
         const bool is_error = !reply.empty() && reply[0] == kReplyError;
