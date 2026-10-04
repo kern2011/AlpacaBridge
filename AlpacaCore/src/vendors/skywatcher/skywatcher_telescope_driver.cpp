@@ -1168,6 +1168,20 @@ public:
     // home position, so homing is a goto to axis angles 0,0. AtHome flips true (and Slewing false) in
     // the same locked step when the goto lands.
     void find_home() override {
+        std::lock_guard<std::mutex> ilock(initiator_mutex_);
+        {
+            // Validate before reaping: a refused FindHome during Park must not
+            // cancel the park task.
+            std::lock_guard<std::mutex> lock(mutex_);
+            check_connected();
+            check_not_parked_locked("FindHome");
+            if (homing_) {
+                return;
+            }
+            if (at_home_ && !get_hardware_slewing_locked(true)) {
+                return;
+            }
+        }
         reap_slew_task();
         reap_pulse_task();
         {
@@ -1185,6 +1199,8 @@ public:
             restore_tracking_after_slew_ = false;
             manual_axis_slewing_[0] = false;
             manual_axis_slewing_[1] = false;
+            goto_in_progress_ = false;
+            restoring_tracking_ = false;
             homing_ = true;
             // open-astro#575: a fresh initiator is a clean start -- a client
             // that calls FindHome after a failed GOTO must not be told the
@@ -1286,6 +1302,8 @@ public:
             restore_tracking_after_slew_ = false;
             manual_axis_slewing_[0] = false;
             manual_axis_slewing_[1] = false;
+            goto_in_progress_ = false;
+            restoring_tracking_ = false;
             parking_ = true;
             // open-astro#575: a fresh initiator is a clean start -- a client
             // that calls Park after a failed GOTO must not be told the OLD
@@ -1582,6 +1600,32 @@ public:
                 end_pulse_locked();
                 return;
             }
+            // open-astro#770: Tracking=false landed while a rate check below
+            // was sampling RA; the check read the stopped axis as "did not
+            // take" and resent ":I"+":J". Stop RA again, unless a reaper owns
+            // the axis now. Called with mutex_ held. Same three attempts as
+            // the pulse stop below, and the same runaway flag if all fail.
+            auto stop_ra_if_tracking_off_locked = [this, ai]() {
+                if (tracking_ || !connected_ || pulse_task_cancel_[ai].load()) {
+                    return;
+                }
+                constexpr int kAttempts = 3;
+                std::string last_error;
+                for (int attempt = 0; attempt < kAttempts; ++attempt) {
+                    try {
+                        protocol_->stop_motion(kAxisRa);
+                        cmd_axis_rate_deg_s_[0] = 0.0;
+                        invalidate_position_cache_locked();
+                        return;
+                    } catch (const std::exception& e) {
+                        last_error = e.what();
+                    }
+                }
+                ALPACA_LOG_ERROR("SkyWatcher", "Pulse: failed to stop RA after Tracking=false (" +
+                                                   std::to_string(kAttempts) +
+                                                   " attempts) -- axis may still be moving: " + last_error);
+                manual_axis_slewing_[0] = true;
+            };
             // Time spent verifying counts as pulse time: on this path the axis
             // is ALREADY running at the pulse rate before the check starts, so
             // the hold below must be shortened by however long it took.
@@ -1602,12 +1646,20 @@ public:
                 verify_live_rate_or_rekick(kAxisRa, ra_restore_rate_deg_per_sec, ra_pulse_rate, pulse_task_cancel_[ai],
                                            dispatch_max_window);
                 verify_elapsed = clock_.now() - verify_start;
+                // A West pulse runs faster than the drive rate, so a stopped
+                // axis reads nearer the old rate and the check resends.
+                std::lock_guard<std::mutex> lock(mutex_);
+                stop_ra_if_tracking_off_locked();
             }
             // What stop_axis() actually restored, for the post-stop verify
             // below. Seeded with the dispatch-time capture so a stop that
             // never ran (or a non-restoring pulse) behaves as before.
             double applied_ra_restore_rate = ra_restore_rate_deg_per_sec;
-            auto stop_axis = [this, axis, restore_tracking, pulse_restart, &applied_ra_restore_rate]() {
+            // open-astro#770: cleared when Tracking=false landed during the
+            // pulse; the end of the pulse then only stops the axis.
+            bool restore_still_wanted = restore_tracking;
+            auto stop_axis = [this, axis, restore_tracking, pulse_restart, &applied_ra_restore_rate,
+                              &restore_still_wanted]() {
                 auto& proto = *protocol_;
                 // Re-derived here, NOT the value captured at dispatch: since
                 // the drive direction became hemisphere-dependent, a
@@ -1621,7 +1673,15 @@ public:
                 // one path that was still using a stale snapshot.
                 double ra_restore_rate_deg_per_sec = 0.0;
                 bool ra_reverses = false;
-                if (restore_tracking) {
+                // Same contract as the MoveAxis(0) restore (#535/#630): the
+                // restore never restarts an axis the client switched off.
+                bool restore = restore_tracking;
+                if (restore) {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    restore = tracking_;
+                    restore_still_wanted = restore;
+                }
+                if (restore) {
                     std::lock_guard<std::mutex> lock(mutex_);
                     ra_restore_rate_deg_per_sec = effective_ra_rate_locked();
                     applied_ra_restore_rate = ra_restore_rate_deg_per_sec;
@@ -1634,7 +1694,7 @@ public:
                     // way at the new rate.
                     ra_reverses = (ra_restore_rate_deg_per_sec > 0.0) != (cmd_axis_rate_deg_s_[0] > 0.0);
                 }
-                if (restore_tracking && !pulse_restart && !ra_reverses) {
+                if (restore && !pulse_restart && !ra_reverses) {
                     // RA pulse over a live tracking axis: restore the drive
                     // step period; the axis never stopped. Same ":J" kick as
                     // the dispatch above, for the same reason, and skipped
@@ -1646,7 +1706,7 @@ public:
                     }
                     std::lock_guard<std::mutex> lock(mutex_);
                     cmd_axis_rate_deg_s_[0] = ra_restore_rate_deg_per_sec;
-                } else if (restore_tracking) {
+                } else if (restore) {
                     // Reversed pulse, or a hemisphere change mid-pulse: full
                     // stop-and-restart back to the drive rate.
                     std::unique_lock<std::mutex> lock(mutex_);
@@ -1716,7 +1776,7 @@ public:
             // the motion, so it costs no pulse distance, but it does hold the
             // pulse task ~450 ms (or more) longer, which the next command's
             // reap must join. Not worth that latency on short guide pulses.
-            if (stopped && restore_tracking && !pulse_restart && duration >= kMinPulseForRateVerifyMs) {
+            if (stopped && restore_still_wanted && !pulse_restart && duration >= kMinPulseForRateVerifyMs) {
                 // What stop_axis() RE-DERIVED, not the dispatch-time capture.
                 // The two differ whenever effective_ra_rate_locked() moved
                 // during the pulse -- a RightAscensionRate write (deferred by
@@ -1739,6 +1799,12 @@ public:
                 // took the busy-axis deferral and waited on a restore this
                 // task had already run: the write was stranded.
                 std::lock_guard<std::mutex> lock(mutex_);
+                // open-astro#770: Tracking=false after the restore, either
+                // during the rate check above or between stop_axis()'s
+                // tracking_ read and its unlocked ":I"+":J".
+                if (restore_still_wanted) {
+                    stop_ra_if_tracking_off_locked();
+                }
                 end_pulse_locked();
             }
             if (!stopped) {
@@ -1764,6 +1830,7 @@ public:
     }
 
     void slew_to_coordinates(double ra, double dec) override {
+        std::unique_lock<std::mutex> ilock(initiator_mutex_);
         {
             // A refused goto must not cancel a goto, park or pulse in flight,
             // so gate BEFORE reaping (the copies below re-check after it).
@@ -1780,17 +1847,31 @@ public:
         check_not_parked_locked("SlewToCoordinates");
         validate_ra_dec(ra, dec, "SlewToCoordinates");
         check_target_altitude_locked(ra, dec, "SlewToCoordinates");
-        goto_in_progress_ = true;
+        uint64_t owner_generation = motion_generation_;
+        goto_in_progress_ = false;
+        restoring_tracking_ = false;
         try {
             do_slew_to_ra_dec_locked(lock, ra, dec);
-            wait_for_slew_complete(lock);
-            refine_goto_landing(lock, ra, dec);
+            owner_generation = motion_generation_;
+            goto_in_progress_ = true;
+            ilock.unlock();
+            if (!wait_for_slew_complete(lock, owner_generation)) {
+                throw AlpacaException("Slew superseded by a concurrent motion command", AlpacaError::InvalidOperation);
+            }
+            if (!refine_goto_landing(lock, ra, dec, &owner_generation)) {
+                throw AlpacaException("Slew superseded by a concurrent motion command", AlpacaError::InvalidOperation);
+            }
+            if (motion_generation_ != owner_generation) {
+                throw AlpacaException("Slew superseded by a concurrent motion command", AlpacaError::InvalidOperation);
+            }
         } catch (...) {
-            goto_in_progress_ = false;
-            // An abandoned goto never reaches the landing that consumes this
-            // stamp, and a Park/FindHome landing within the next 30 s would
-            // otherwise fold the abandoned interval into goto_overhead_seconds_.
-            last_goto_dispatch_time_ = std::chrono::steady_clock::time_point{};
+            if (motion_generation_ == owner_generation) {
+                goto_in_progress_ = false;
+                // An abandoned goto never reaches the landing that consumes this
+                // stamp, and a Park/FindHome landing within the next 30 s would
+                // otherwise fold the abandoned interval into goto_overhead_seconds_.
+                last_goto_dispatch_time_ = std::chrono::steady_clock::time_point{};
+            }
             throw;
         }
         // Same order as the async task: Slewing stays true until tracking is
@@ -1809,10 +1890,16 @@ public:
         try {
             restore_tracking_after_slew_locked(lock);
         } catch (...) {
-            restoring_tracking_ = false;
+            if (!parking_ && !homing_ && !goto_in_progress_ && !slewing_cached_ && !manual_axis_slewing_[0] &&
+                !manual_axis_slewing_[1]) {
+                restoring_tracking_ = false;
+            }
             throw;
         }
-        restoring_tracking_ = false;
+        if (!parking_ && !homing_ && !goto_in_progress_ && !slewing_cached_ && !manual_axis_slewing_[0] &&
+            !manual_axis_slewing_[1]) {
+            restoring_tracking_ = false;
+        }
     }
 
     void slew_to_coordinates_async(double ra, double dec) override {
@@ -1855,6 +1942,8 @@ public:
             restore_tracking_after_slew_ = tracking_;
             manual_axis_slewing_[0] = false;
             manual_axis_slewing_[1] = false;
+            goto_in_progress_ = false;
+            restoring_tracking_ = false;
             parked_ = false;
             at_home_ = false;
         }
@@ -2077,6 +2166,8 @@ public:
             if (moving) {
                 parked_ = false;
                 at_home_ = false;
+                goto_in_progress_ = false;
+                restoring_tracking_ = false;
                 // Command the motion BEFORE publishing the Slewing flag: if the
                 // transport throws (seen as UDP timeouts over a flaky Wi-Fi
                 // link), a pre-set flag is never cleared and Slewing wedges
@@ -2495,6 +2586,10 @@ private:
     }
 
     void reset_runtime_state_locked() {
+        // Invalidate every unlocked stop-wait from the previous connection.
+        // `connected_` alone cannot distinguish a reconnect that completed
+        // while an older operation was sleeping outside mutex_.
+        ++motion_generation_;
         target_ra_set_ = false;
         target_dec_set_ = false;
         client_disagreement_warned_ = false;  // open-astro#400: one WARN per connection
@@ -3767,8 +3862,12 @@ private:
     // After the first goto lands, close the residual (prediction error) with
     // short re-gotos until inside the deadband. Slewing is held true across
     // the inter-goto gaps by goto_in_progress_, which both callers set.
-    void refine_goto_landing(std::unique_lock<std::mutex>& lock, double ra, double dec) {
+    bool refine_goto_landing(std::unique_lock<std::mutex>& lock, double ra, double dec,
+                             uint64_t* expected_generation = nullptr) {
         for (int iter = 0; iter < 3; ++iter) {
+            if (expected_generation && motion_generation_ != *expected_generation) {
+                return false;
+            }
             if (slew_task_cancel_.load()) {
                 break;  // AbortSlew/unpark/disconnect cancelled the slew
             }
@@ -3782,9 +3881,19 @@ private:
             }
             slewing_cached_ = true;
             dispatch_predicted_goto_locked(lock, ra, dec);
-            wait_for_slew_complete(lock);
+            if (expected_generation) {
+                *expected_generation = motion_generation_;
+            }
+            if (!wait_for_slew_complete(
+                    lock, expected_generation ? std::optional<uint64_t>(*expected_generation) : std::nullopt)) {
+                return false;
+            }
+        }
+        if (expected_generation && motion_generation_ != *expected_generation) {
+            return false;
         }
         slewing_cached_ = false;
+        return true;
     }
 
     void do_slew_to_ra_dec_locked(std::unique_lock<std::mutex>& lock, double ra, double dec) {
@@ -3810,6 +3919,7 @@ private:
             // pre-published slew state so Slewing cannot wedge true.
             slewing_cached_ = false;
             restore_tracking_after_slew_ = false;
+            last_goto_dispatch_time_ = std::chrono::steady_clock::time_point{};
             throw;
         }
         manual_axis_slewing_[0] = false;
@@ -4309,7 +4419,8 @@ private:
                 " s after the controller reported it stopped");
     }
 
-    void wait_for_slew_complete(std::unique_lock<std::mutex>& lock) const {
+    bool wait_for_slew_complete(std::unique_lock<std::mutex>& lock,
+                                std::optional<uint64_t> expected_generation = std::nullopt) const {
         const auto timeout = std::chrono::seconds(180);
         auto start = std::chrono::steady_clock::now();
         const auto start_grace = std::chrono::seconds(2);
@@ -4321,6 +4432,9 @@ private:
             check_connected();
         };
         while (true) {
+            if (expected_generation && motion_generation_ != *expected_generation) {
+                return false;
+            }
             if (slew_task_cancel_.load()) {
                 // A reap (unpark cancelling an in-flight park, or a newer async
                 // slew) wants this waiter gone; abandon the wait promptly so
@@ -4345,6 +4459,9 @@ private:
         }
         wait_axis_stationary_locked(lock, kAxisRa);
         wait_axis_stationary_locked(lock, kAxisDec);
+        if (expected_generation && motion_generation_ != *expected_generation) {
+            return false;
+        }
         last_landing_time_ = std::chrono::steady_clock::now();
         if (last_goto_dispatch_time_ != std::chrono::steady_clock::time_point{}) {
             const double took = std::chrono::duration<double>(last_landing_time_ - last_goto_dispatch_time_).count();
@@ -4365,6 +4482,7 @@ private:
         if (slew_settle_time_seconds_ > 0) {
             sleep_unlocked(std::chrono::seconds(slew_settle_time_seconds_));
         }
+        return !expected_generation || motion_generation_ == *expected_generation;
     }
 
     // ── Background task threads (async slew, pulse stop) ────────────────────
