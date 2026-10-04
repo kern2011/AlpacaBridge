@@ -1126,7 +1126,7 @@ private:
     // every tty.
     int poll_serial_readable(int budget_ms) {
 #ifndef _WIN32
-        struct pollfd pfd{};
+        struct pollfd pfd {};
         pfd.fd = serial_fd_;
         pfd.events = POLLIN;
         pfd.revents = 0;
