@@ -19,8 +19,9 @@
 - **Sky-Watcher: a byte-dropped (malformed) reply is resent, not failed** (AlpacaCore):
   electrical noise occasionally corrupts a reply (a dropped byte, e.g. a truncated `:j1`
   "25278"); the wrapper now settles and resends once -- the same recovery it already used for
-  a mis-paired reply -- instead of throwing and failing the whole operation. This applies to
-  both the serial and the UDP (Wi-Fi) transport. A `!` board rejection is still never resent.
+  a mis-paired reply -- instead of throwing and failing the whole operation. This engages on
+  the serial transport; the UDP (Wi-Fi) path already drops malformed datagrams in
+  `exchange_udp` before they reach the resend. A `!` board rejection is still never resent.
 
 ### Added (tests)
 - **Sky-Watcher serial: a quiet board times out within the command budget** (AlpacaCore):

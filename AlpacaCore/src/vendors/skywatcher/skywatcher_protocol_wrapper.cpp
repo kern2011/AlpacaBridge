@@ -1287,6 +1287,11 @@ private:
                 if (err == EIO || err == ENXIO || err == ENODEV || err == EBADF || serial_node_removed_locked()) {
                     lose_serial_link_locked("Serial write failed: " + util::errno_string(err));
                 }
+                // A non-blocking write can stop part-way (deadline hit after a partial
+                // frame). Discard the queued fragment so it cannot prefix the next
+                // command, and mark the link dirty so the next exchange settles first.
+                tcflush(serial_fd_, TCOFLUSH);
+                serial_dirty_ = true;
                 throw AlpacaException("Serial write failed: " + util::errno_string(err));
             }
             std::string reply;
@@ -1713,8 +1718,11 @@ std::string SkyWatcherProtocolWrapper::send_command(char command, int axis, cons
         // applied the first frame, so a resend can double-apply. This is the same
         // trade-off the mis-pair path already accepted (PR #245) -- these commands
         // are idempotent in practice (re-issuing the same target/mode/start is a
-        // no-op or a harmless repeat) -- and it is the shared serial+UDP path, so
-        // the recovery applies on both transports.
+        // no-op or a harmless repeat).
+        // In practice this recovery only engages over SERIAL: exchange_udp returns
+        // only a "!" reply or a "=" reply of the expected length and drops any other
+        // datagram, so a malformed/mis-paired reply never reaches this branch on the
+        // UDP (Wi-Fi) transport.
         // TODO: a resend of a motion command whose FIRST frame was applied can draw
         // a "!" rejection (e.g. ":J" -> "motor not stopped"), surfacing as
         // MotorControllerRejected on a move that actually started. If that proves to
