@@ -1,13 +1,14 @@
 ### Fixed
-- **Sky-Watcher: a quiet serial board can no longer wedge the whole driver** (AlpacaCore):
+- **Sky-Watcher: a quiet serial board can no longer wedge the connected link** (AlpacaCore):
   some USB CDC-ACM virtual COM ports do not honour `VMIN`/`VTIME` as a read timeout, so a
   bare `read()` in the mis-paired-reply settle and in the reply read loop parked forever in
   `n_tty_read` when the board went quiet mid-exchange, holding the protocol-wrapper I/O
   mutex and the driver mutex above it so every Alpaca request blocked until the service was
-  killed. The Sky-Watcher serial reads are now bounded by `poll()` and run on a non-blocking
-  fd, so a read can never park regardless of the tty's `VMIN`/`VTIME` (or a spurious
-  `poll()` readable): a quiet board now times out and retransmits as intended instead of
-  hanging. Other serial vendors are unchanged.
+  killed. The connected link's reads (`settle_serial`/`exchange_serial`) are now bounded by
+  `poll()` and run on a non-blocking fd, so a read can never park regardless of the tty's
+  `VMIN`/`VTIME` (or a spurious `poll()` readable): a quiet board now times out and
+  retransmits as intended instead of hanging. (The auto-detect probe path is unchanged;
+  other serial vendors are unchanged.)
 - **Sky-Watcher: serial writes no longer fail fast on a full TX buffer** (AlpacaCore):
   because the fd is kept non-blocking for the read fix above, `write()` can return `EAGAIN`
   before the first byte when the transmit buffer fills (a board that stopped draining), and
