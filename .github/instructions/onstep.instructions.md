@@ -222,6 +222,29 @@ it is never reachable through `router.cpp` or the web UI.
   lands between its `stat()` and the record leaves no loss behind and does not close the new link, and
   a Disconnect bumps the generation before it closes the port; the close that follows a recorded loss
   re-checks under `mutex_` that the link is still connected and still lost (#1289).
+- **A mount that stops answering with the adapter still plugged in latches a fault, then a loss**
+  (#1414, decision 0009): mount unpowered, or the cable pulled at the mount end, so the node and the
+  fd stay healthy and nothing answers. Before, the status and position caches swallowed every
+  failure once filled, so `Connected` stayed true and every read served old values after waiting
+  out the response timeout. Now each failed `:GU#`, `:GRa#`/`:GDe#` or `:GA#`/`:GZ#` read counts
+  in `util::PolledLinkHealth`: the first two in a row still serve the cache (logged WARN), the
+  third latches a fault (ERROR) and those reads throw `DriverException` "OnStep mount
+  communications compromised" while `Connected` stays true and `get_link_fault()` reads "Mount not
+  answering (...)"; while faulted no read serves a cache (not inside the 2 s window, not
+  `SideOfPier`): each asks the mount, and one good reply clears the fault (INFO). Writes throw the
+  same `DriverException` (`refuse_while_faulted_locked()`; the motion and state commands, not the
+  raw `command_blind`/`command_bool` pass-through): the commands are blind, so on a
+  healthy fd they cannot fail and would otherwise report success to a mount that is not
+  listening. `AbortSlew` and `MoveAxis(axis, 0)` send their stops first and then throw, so the stop
+  is still tried and the client learns it may not have arrived. A fault that has
+  stood for `util::kLinkStalenessBound` (30 s, on the driver's task clock; tests advance a
+  `FakeTaskClock`) is a lost link: `OnStepProtocolWrapper::declare_link_lost()` records the reason and the
+  loss time and closes the port, as for a pulled adapter, so `Connected` reads false, calls throw
+  `NotConnected`, `DeviceState` is empty, and the next Connect relinks (and runs the #521 stops
+  after a long outage). That outage runs from the loss, not from the last good reply: the failed
+  reads still found the fd alive, so a Connect right after the loss stops nothing, and one after
+  the preserve window sends the stops. There is no poll thread: the reads are the client's, so the time to latch
+  is the client's poll cadence times three, each failed read costing the response timeout.
 - **An equatorial slew needs Tracking** (#1274, the [ascom-contract rule](ascom-contract.instructions.md#equatorial-slews-require-tracking-all-telescope-drivers)): `SlewToCoordinates(Async)` and
   `SlewToTarget(Async)` throw `InvalidOperation` ("<member> requires Tracking to be true") while
   `Tracking` reads false, after the parked check and coordinate validation and before any target or
