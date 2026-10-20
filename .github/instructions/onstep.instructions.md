@@ -237,6 +237,34 @@ it is never reachable through `router.cpp` or the web UI.
   ConformU log, where `Park`/`FindHome` also take ~30s in wall-clock terms but show `0.001s ✓
   (EXTENDED)` in the timing table). Real GEM mounts physically cannot park/home in 1 second;
   fire-and-forget is the only way to pass this target with genuine hardware.
+- **Park and FindHome stop any motion first and read the answer** (#1430): OnStepX refuses a park
+  or a home while a guide move (a `MoveAxis`, or its braking), a GOTO or a home runs
+  (`Park::request`, `Home::request`: `CE_SLEW_IN_MOTION`), and the driver used to send `:hP#` and
+  `:hC#` blind, so a `Park` right after `MoveAxis(axis, 0)` returned success and never parked
+  (HM-17, 2026-10-20). Now, when the mount is moving, they send AbortSlew's stops and wait until
+  `:GU#` shows no `g`, `G`, GOTO or `h` (at most 6 s); `:hP#`'s bare `1`/`0` is read; `:GE#`
+  is read right after a refused `:hP#` and after every `:hC#` (any later command replaces it; checked on the HM-17:
+  `22` during braking, `25` after an accepted park, `00` after an accepted home). OnStep 4.x has
+  `:GE#` too, per channel, with the same codes up to 23 (OnStep `Globals.h` `CommandErrors`; no
+  25), and its `:hC#` stops the mount when it refuses for motion. Code 22 is retried for 3 s; any
+  other refusal throws `InvalidOperation` with the reason. A reply that is not a two-digit code
+  (firmware without `:GE#`, 1 s timeout) leaves the reason unknown: a refused park is retried,
+  then reported as "no reason given", and a home counts as started, as before. That timeout runs
+  with `mutex_` held, as every serial exchange does: on such firmware a `FindHome` takes about 1 s
+  longer, and each refused park try as much. The code is kept per serial channel; a Smart Web
+  Server page that shares the channel can replace it between `:hP#` and `:GE#` (rare), and the
+  refusal then reads as another code. A `:hP#` answered `0` or garbled is taken as accepted when
+  `:GE#` then says 0 or 25. Not covered by a test: a link lost between `:hC#` and `:GE#`
+  (`get_last_command_error()` rethrows then, so FindHome reports the loss). Every wait runs on the task clock (`clock_.sleep_for`, decision 0005) and releases `mutex_` (as `wait_for_condition_locked()` does), so getters,
+  `AbortSlew` and Disconnect answer meanwhile; after each wait `check_connected()` runs, and a
+  newer motion command (`motion_epoch_`: `MoveAxis`, `AbortSlew`, a GOTO, `Unpark`, another
+  `Park`/`FindHome`, a disconnect) ends the waiting one without sending it. A mount that is
+  still parks as fast as before (HM-17: 0.15 s), within the fire-and-forget rule above. Only a
+  park or home that must first stop motion takes longer: about 1 s after a `MoveAxis` on the
+  HM-17, more after a fast GOTO is stopped, so ConformU can note it as a timing issue there. That
+  is the price of reporting a refusal to the client: returning at once and parking from a
+  background body would leave a refused park silent again (#1430). A `Park` while one runs
+  (`I`), or a `FindHome` while one runs (`h`), is a no-op.
 - **A slow first post-Connect `DeviceState` means the connect did not run** (#1242). A
   ConformU-style preamble from one ClientID (`Connected=True` → `Connected=False` → `Connect()`,
   poll `Connecting`) gets its first `DeviceState` in 3-5 ms with no serial reads: the connect's
