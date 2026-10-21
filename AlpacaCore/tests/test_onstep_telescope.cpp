@@ -1179,8 +1179,9 @@ struct ParkHomeFake {
     bool has_ge = true;           // false: firmware without :GE# (answers like an unknown command)
     bool garbled_accept = false;  // :hP# accepted, but its reply reads as '0'
     int last_error = 0;
-    // The fake time of the first :hP# or :hC#.
+    // The fake time of the first :hP# or :hC#, and of every :hP#.
     std::optional<alpacacore::util::TaskClock::clock::time_point> first_try_at;
+    std::vector<alpacacore::util::TaskClock::clock::time_point> park_tries;
 
     void settle_locked() {
         if (stopping && clock.now() - stop_at >= std::chrono::milliseconds(brake_ms)) {
@@ -1255,6 +1256,7 @@ struct ParkHomeFake {
             first_try_at = clock.now();
         }
         if (chunk.rfind(":hP", 0) == 0) {
+            park_tries.push_back(clock.now());
             last_error = refusal_locked();
             if (last_error != 0) return "0";
             last_error = park_zero_ok ? 0 : 25;
@@ -1328,7 +1330,9 @@ TEST_CASE("OnStep Telescope Driver - Park during a MoveAxis stops the move and p
     const auto t0 = mount->clock.now();
     REQUIRE_NOTHROW(on_clock(*mount, *driver, [&] { driver->park(); }));
     REQUIRE(mount->first_try_at);
-    CHECK(*mount->first_try_at - t0 < std::chrono::seconds(1));  // the wait ends once the mount is still
+    // Braking ends at 300 ms; with 100 ms polls the park goes out at the first
+    // poll that finds the mount still.
+    CHECK(*mount->first_try_at - t0 < std::chrono::milliseconds(400));
     CHECK(mount->first(":Qe#") < mount->first(":hP#"));        // stopped before the park
     CHECK(mount->count(":hP#") >= 1);
     const auto moves = mount->count(":Me#");
@@ -1351,6 +1355,11 @@ TEST_CASE("OnStep Telescope Driver - Park is retried while the mount reports it 
     REQUIRE_NOTHROW(on_clock(*mount, *driver, [&] { driver->park(); }));
     CHECK(mount->count(":hP#") == 3);
     CHECK(mount->count(":GE#") == 2);
+    std::lock_guard<std::mutex> lock(mount->mutex);
+    REQUIRE(mount->park_tries.size() == 3);
+    for (std::size_t i = 1; i < mount->park_tries.size(); ++i) {
+        CHECK(mount->park_tries[i] - mount->park_tries[i - 1] >= std::chrono::milliseconds(200));  // paced retries
+    }
 
     driver->set_connected(false);
 }
@@ -1813,6 +1822,26 @@ TEST_CASE("OnStep Telescope Driver - an AbortSlew between Park's in-motion retri
     driver->set_connected(false);
 }
 
+// #1430: a FindHome the mount takes at once also ends a Park still waiting
+// to retry, although it starts no background part of its own.
+TEST_CASE("OnStep Telescope Driver - a FindHome taken at once ends a Park still retrying",
+          "[onstep][telescope][unit]") {
+    auto mount = std::make_shared<ParkHomeFake>();
+    mount->refuse_in_motion = 1;  // the Park's first try only
+    alpacacore::test::FakeMountServer server([mount](const std::string& chunk) { return mount->reply(chunk); });
+    REQUIRE(server.ok());
+    auto driver = connect_park_home_fake(server, *mount);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+
+    REQUIRE_NOTHROW(driver->park());  // refused "in motion": the retries go to the background
+    REQUIRE(mount->count(":hP#") == 1);
+    REQUIRE_NOTHROW(driver->find_home());  // taken at once
+    REQUIRE(mount->count(":hC#") == 1);
+    run_clock(*mount, std::chrono::seconds(5));
+    CHECK(mount->count(":hP#") == 1);
+    driver->set_connected(false);
+}
+
 // #1430, the shared rule "A failed async operation body keeps its error": a
 // refusal the background part meets is kept and raised by Slewing and AtPark
 // (a park's) until the next motion command or a reconnect, each a clear site
@@ -1976,6 +2005,13 @@ TEST_CASE("OnStep Telescope Driver - FindHome and Park never restart tracking", 
         abort_a_goto();
         REQUIRE_NOTHROW(driver->find_home());
         finish_home();
+    }
+
+    SECTION("Park from home reads as slewing and away from home at once") {
+        mount->set_status("NpHEW180#");  // tracking, at home
+        REQUIRE_NOTHROW(driver->park());
+        CHECK(driver->get_slewing());
+        CHECK_FALSE(driver->get_at_home());
     }
 
     SECTION("Park after an aborted GOTO") {

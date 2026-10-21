@@ -335,6 +335,15 @@ TEST_CASE("OnStep link loss - a link lost before the :GE# read fails it instead 
     CHECK_FALSE(protocol.link_alive());
 }
 
+// #1430: on a link that is closed rather than lost, the :GE# read fails too,
+// instead of reading as "no code".
+TEST_CASE("OnStep link loss - the :GE# read fails NotConnected while disconnected", "[onstep][serial][connected]") {
+    WrapperReset reset;
+    auto& protocol = OnStepProtocolWrapper::instance();
+    REQUIRE_FALSE(protocol.is_connected());
+    require_not_connected_error([&] { (void)protocol.get_last_command_error(); });
+}
+
 TEST_CASE("OnStep link loss - Connected=true on a lost link reconnects instead of short-circuiting",
           "[onstep][serial][connected]") {
     WrapperReset reset;
