@@ -1754,6 +1754,30 @@ TEST_CASE("OnStep Telescope Driver - a newer command ends a waiting Park or Find
     driver->set_connected(false);
 }
 
+// #1430: a stop that cannot be sent fails the Park with DriverException
+// before :hP#, as MoveAxis(axis, 0) and AbortSlew report theirs (#742,
+// #781). The stops are blind sends, so the fake drops the connection: every
+// write after that fails while the wrapper still reads the link as alive.
+TEST_CASE("OnStep Telescope Driver - Park reports a stop it could not send", "[onstep][telescope][unit]") {
+    auto mount = std::make_shared<ParkHomeFake>();
+    alpacacore::test::FakeMountServer server([mount](const std::string& chunk) { return mount->reply(chunk); });
+    REQUIRE(server.ok());
+    auto driver = connect_park_home_fake(server, *mount);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+
+    start_move(*driver, *mount, 0, 1.0);
+    REQUIRE(server.drop_connections());
+    try {
+        on_clock(*mount, [&] { driver->park(); });
+        FAIL("Park returned success although the motion could not be stopped");
+    } catch (const alpacacore::AlpacaException& ex) {
+        CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
+        CHECK(std::string(ex.what()).find("could not stop the running motion first") != std::string::npos);
+    }
+    CHECK(mount->count(":hP#") == 0);
+    driver->set_connected(false);
+}
+
 // #1430 (review): the wait for the braking releases the driver lock, so other
 // calls are answered meanwhile, and an AbortSlew in that time ends the Park
 // before :hP# is sent.
@@ -1848,6 +1872,33 @@ TEST_CASE("OnStep Telescope Driver - Park waiting for the braking does not block
     }
     SECTION("an Unpark during the wait ends the Park") {
         park_superseded_by([&] { driver->unpark(); }, false);
+    }
+    SECTION("a disconnect during the wait fails the Park NotConnected") {
+        start_move(*driver, *mount, 0, 1.0);
+        std::exception_ptr park_error;
+        std::atomic<bool> parker_done{false};
+        const auto seen = mount->clock.wait_count();
+        std::thread parker([&] {
+            try {
+                driver->park();
+            } catch (...) {
+                park_error = std::current_exception();  // Catch2 asserts only on the test thread
+            }
+            parker_done = true;
+        });
+        CHECK(wait_logged(*mount, ":Qe#"));
+        CallBesidePark disconnect([&] { driver->set_connected(false); });
+        CHECK(disconnect.returned_within(std::chrono::seconds(5)));
+        drive_until(*mount, parker_done, seen);
+        parker.join();
+        CHECK_FALSE(disconnect.join());
+        REQUIRE(park_error);
+        try {
+            std::rethrow_exception(park_error);
+        } catch (const alpacacore::AlpacaException& ex) {
+            CHECK(ex.error_code() == alpacacore::AlpacaError::NotConnected);
+        }
+        CHECK(mount->count(":hP#") == 0);
     }
     SECTION("a reconnect during the wait ends the Park") {
         park_superseded_by(
