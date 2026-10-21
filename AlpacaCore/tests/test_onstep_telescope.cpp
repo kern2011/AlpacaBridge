@@ -1635,7 +1635,8 @@ TEST_CASE("OnStep Telescope Driver - Park and FindHome accepted without a clean 
         CHECK(mount->count(":hC#") == 1);
     }
     SECTION("FindHome whose :GE# reply is not a two-digit code") {
-        mount->ge_reply = "E1#";
+        const auto reply = GENERATE(std::string("E1#"), std::string("1E#"), std::string("123#"));
+        mount->ge_reply = reply;
         REQUIRE_NOTHROW(on_clock(*mount, [&] { driver->find_home(); }));
         CHECK(mount->count(":hC#") == 1);
     }
@@ -1782,6 +1783,62 @@ TEST_CASE("OnStep Telescope Driver - Park reports a stop it could not send", "[o
         CHECK(std::string(ex.what()).find("could not stop the running motion first") != std::string::npos);
     }
     CHECK(mount->count(":hP#") == 0);
+    // The re-send ends with the failed stop, as AbortSlew's does (#781): no
+    // tick runs, so no status read fails on the dropped link.
+    std::atomic<int> resend_warns{0};
+    {
+        struct SinkGuard {
+            alpacacore::logging::LogSink previous = alpacacore::logging::get_log_sink();
+            ~SinkGuard() { alpacacore::logging::set_log_sink(previous); }
+        } sink_guard;
+        alpacacore::logging::set_log_sink(
+            [&](alpacacore::logging::LogLevel level, std::string_view component, std::string_view message) {
+                if (level == alpacacore::logging::LogLevel::Warn && component == "OnStep" &&
+                    message.find("MoveAxis re-send") != std::string_view::npos) {
+                    ++resend_warns;
+                }
+            });
+        mount->clock.advance(std::chrono::seconds(14));  // two re-send intervals
+        (void)mount->clock.wait_for_woken_settled(std::chrono::seconds(5));
+    }
+    CHECK(resend_warns.load() == 0);
+    driver->set_connected(false);
+}
+
+// #1430: each OnStepX refusal code reads as its reason (COMMAND_REFERENCE.md,
+// "Command Error Codes"), and an unknown one as its number.
+TEST_CASE("OnStep Telescope Driver - Park names every OnStepX refusal code", "[onstep][telescope][unit]") {
+    const auto [code, reason] = GENERATE(table<int, std::string>({
+        {8, "not parked or at home"},
+        {9, "already parked"},
+        {10, "park failed"},
+        {11, "not parked"},
+        {12, "no park position set"},
+        {13, "goto failed"},
+        {15, "target below the horizon limit"},
+        {16, "target above the overhead limit"},
+        {17, "controller in standby"},
+        {18, "mount parked"},
+        {19, "goto already active"},
+        {20, "outside configured limits"},
+        {21, "hardware fault"},
+        {23, "slew error"},
+        {14, "error code 14"},
+    }));
+    auto mount = std::make_shared<ParkHomeFake>();
+    mount->refuse_code = code;
+    alpacacore::test::FakeMountServer server([mount](const std::string& chunk) { return mount->reply(chunk); });
+    REQUIRE(server.ok());
+    auto driver = connect_park_home_fake(server, *mount);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+
+    try {
+        on_clock(*mount, [&] { driver->park(); });
+        FAIL("Park returned success although the mount refused it");
+    } catch (const alpacacore::AlpacaException& ex) {
+        CHECK(ex.error_code() == alpacacore::AlpacaError::InvalidOperation);
+        CHECK(std::string(ex.what()).find("(" + reason + ")") != std::string::npos);
+    }
     driver->set_connected(false);
 }
 

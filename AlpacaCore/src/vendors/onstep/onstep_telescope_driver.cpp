@@ -1510,6 +1510,10 @@ private:
             try_stop([&protocol, dir]() { protocol.move_axis_stop(dir); });
         }
         if (!stop_error.empty()) {
+            // The mount may still be moving: leave Slewing as it was, but stop
+            // re-sending a MoveAxis, as AbortSlew does (#781).
+            manual_axis_resend_[0] = false;
+            manual_axis_resend_[1] = false;
             throw AlpacaException(std::string(who) + ": could not stop the running motion first: " + stop_error,
                                   AlpacaError::DriverException);
         }

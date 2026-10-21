@@ -227,7 +227,8 @@ it is never reachable through `router.cpp` or the web UI.
   so `Connected` stays false while `Connecting` is true (the tier-2 contract sweep checks it). The
   internal `connected_` still flips at the old point, because the warm-up's own helpers check it.
 - **`Park()`/`FindHome()` must be fire-and-forget, not blocking**: send the command and return
-  immediately (optimistically marking `is_parked=false`/`is_at_home=false` and `is_slewing=true`,
+  without waiting for the park or home to finish (a running motion is stopped first, #1430, below;
+  optimistically marking `is_parked=false`/`is_at_home=false` and `is_slewing=true`,
   letting the next status poll pick up real completion), matching iOptron's pattern. A first
   version blocked synchronously until the mount physically finished (`wait_for_condition_locked`)
   — functionally correct, but ConformU classifies `Park`/`FindHome` under the strict STANDARD
@@ -262,7 +263,10 @@ it is never reachable through `router.cpp` or the web UI.
   `FindHome` there is never taken as one already running. Every wait runs on the task clock (`clock_.sleep_for`, decision 0005) and releases `mutex_` (as `wait_for_condition_locked()` does), so getters,
   `AbortSlew` and Disconnect answer meanwhile; after each wait `check_connected()` runs, and a
   newer motion command (`motion_epoch_`: `MoveAxis`, `AbortSlew`, a GOTO, `Unpark`, another
-  `Park`/`FindHome`, a disconnect) ends the waiting one without sending it. A mount that is
+  `Park`/`FindHome`, a disconnect) ends the waiting one without sending it; a `PulseGuide` does
+  not, so a pulse sent meanwhile is waited out or reported as "in motion". A `Park` or `FindHome`
+  whose stop cannot be sent throws `DriverException` and ends the `MoveAxis` re-send, as
+  `AbortSlew` does. A mount that is
   still parks as fast as before (HM-17: 0.15 s), within the fire-and-forget rule above. Only a
   park or home that must first stop motion takes longer: about 1 s after a `MoveAxis` on the
   HM-17, more after a fast GOTO is stopped, so ConformU can note it as a timing issue there. That
