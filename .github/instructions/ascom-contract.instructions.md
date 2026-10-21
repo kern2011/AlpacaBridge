@@ -18,7 +18,7 @@ operation slot (`util::AsyncOperation`, see Threads & shutdown in [driver-lifecy
 `Slewing` flip in the same locked step (the public `Slewing` getter returns true while
 `parking_`; the body polls the hardware through a separate `poll_hardware_slewing_locked`).
 Park twice is a no-op; `Unpark`/`AbortSlew` during a park clear `parking_` (Unpark also
-stops the axes and cancels and joins the body); disconnect and the destructor cancel + join through the slot. Keep any
+stops the axes; SynScan supersedes the body, Celestron cancels and joins it until #1406); disconnect and the destructor cancel + join through the slot. Keep any
 pre-slew safety gate (Celestron alignment check) synchronous in `park()` so a refused park
 still throws instead of silently never reaching `AtPark`. Drivers with native park commands
 that return at once (iOptron `:MP1#`, OnStep `:hP#`, ZWO `:hP#`) need no task (OnStep first stops a
@@ -99,6 +99,15 @@ only that the slew threw.
 All map to HTTP 200 with a non-zero `ErrorNumber` — clients read the body, not the status.
 
 A camera's "no image yet" answer (`ImageArray` before any exposure, or while one is still running) is an `InvalidOperation` the contract requires, not a fault: throw it with `AlpacaException::asked_too_early(message)`, so the router logs it at DEBUG instead of ERROR (issue #1167). Never use it for an `InvalidOperation` that reports a failed, stopped or racing exposure. The tier-2 contract sweep checks the first case on every camera fake.
+
+### A failed async operation body keeps its error (all drivers)
+
+The ASCOM async FAQ makes a failed async command (a goto, a slew, a cover move, an exposure) a failed
+operation. The body keeps its error, and the device's completion property (`IsMoving`, `Position`,
+`CoverState`/`CalibratorState`, `ImageReady`, `Slewing`, ...) raises it until the next command of that kind
+or a reconnect clears it. Never log the failure and report done, and never answer the property with a live
+read that invents a value. Clear the kept error in the connect/teardown path as well, and test each clear
+site on its own. Precedent: the QHY CFW3 `Position` (`move_failure_`), the Gemini flat panel.
 
 ### UniqueID is the router's persisted GUID (all drivers)
 
