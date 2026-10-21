@@ -1147,9 +1147,10 @@ void run_synchronous_slew(alpacacore::test::FakeTaskClock& clock, const std::fun
 }
 
 // #1430: a scripted OnStepX 10.23a for Park and FindHome. A stop (:Q...) ends
-// the guide move or GOTO after `brake_ms` of braking ('g', or no 'N', stays
-// until then); :hP# and
-// :hC# are refused with CE_SLEW_IN_MOTION (22) while 'g' shows, or while
+// the guide move, GOTO, home or pulse guide after `brake_ms` of braking ('g',
+// no 'N', 'h' or 'G' stays until then); :hP# and :hC# are refused with
+// CE_SLEW_IN_MOTION (22) while any of them shows (Park::request,
+// Home::request), or while
 // `refuse_in_motion` refusals are left, or with `refuse_code`; :GE# answers
 // the code of the command before it, which any other command resets, as
 // OnStepX does (ProcessCmds.cpp).
@@ -1161,6 +1162,11 @@ struct ParkHomeFake {
     bool goto_active = false;
     bool parking = false;
     bool homing = false;
+    bool pulse_active = false;  // 'G'; a pulse guide ends only on a stop here
+    bool sends_g = true;        // false: firmware without 'g' in :GU#
+    bool tracking = true;       // false: 'n' in :GU#
+    bool home_ack_25 = false;   // :hC# accepted with :GE# 25 instead of 0
+    bool park_zero_ok = false;  // :hP# accepted, reply reads '0', :GE# 00
     int brake_ms = 300;
     // Every driver timer and this fake's braking run on it (decision 0005).
     alpacacore::test::FakeTaskClock clock;
@@ -1177,6 +1183,8 @@ struct ParkHomeFake {
         if (stopping && clock.now() - stop_at >= std::chrono::milliseconds(brake_ms)) {
             guide_active = false;
             goto_active = false;
+            homing = false;
+            pulse_active = false;
             stopping = false;
         }
     }
@@ -1199,7 +1207,7 @@ struct ParkHomeFake {
     }
     // Refusal for :hP#/:hC#, or 0 when accepted.
     int refusal_locked() {
-        if (g_locked() || goto_active) return 22;
+        if (g_locked() || goto_active || homing || pulse_active) return 22;
         if (refuse_in_motion > 0) {
             --refuse_in_motion;
             return 22;
@@ -1220,11 +1228,12 @@ struct ParkHomeFake {
         if (chunk.rfind(":GXEE", 0) == 0) return "1";
         if (chunk.rfind(":GU", 0) == 0) {
             const bool g = g_locked();
-            return std::string(goto_active ? "" : "N") + (parked ? "P" : (parking ? "I" : "p")) + (g ? "g" : "") +
+            return std::string(tracking ? "" : "n") + (goto_active ? "" : "N") +
+                   (parked ? "P" : (parking ? "I" : "p")) + (g && sends_g ? "g" : "") + (pulse_active ? "G" : "") +
                    (homing ? "h" : "") + "EW180#";
         }
         if (chunk.rfind(":Q", 0) == 0) {
-            if ((guide_active || goto_active) && !stopping) {
+            if ((guide_active || goto_active || homing || pulse_active) && !stopping) {
                 stopping = true;
                 stop_at = clock.now();
             }
@@ -1241,12 +1250,13 @@ struct ParkHomeFake {
         if (chunk.rfind(":hP", 0) == 0) {
             last_error = refusal_locked();
             if (last_error != 0) return "0";
-            last_error = 25;
+            last_error = park_zero_ok ? 0 : 25;
             parked = true;
-            return garbled_accept ? "0" : "1";
+            return garbled_accept || park_zero_ok ? "0" : "1";
         }
         if (chunk.rfind(":hC", 0) == 0) {
             last_error = refusal_locked();
+            if (last_error == 0 && home_ack_25) last_error = 25;
             return "";
         }
         if (chunk.rfind(":S", 0) == 0) return "1";
@@ -1380,8 +1390,10 @@ TEST_CASE("OnStep Telescope Driver - Park during a MoveAxis stops the move and p
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
 
     start_move(*driver, *mount, 0, 1.0);
+    const auto t0 = mount->clock.now();
     REQUIRE_NOTHROW(on_clock(*mount, [&] { driver->park(); }));
-    CHECK(mount->first(":Qe#") < mount->first(":hP#"));  // stopped before the park
+    CHECK(mount->clock.now() - t0 < std::chrono::seconds(1));  // the wait ends once the mount is still
+    CHECK(mount->first(":Qe#") < mount->first(":hP#"));        // stopped before the park
     CHECK(mount->count(":hP#") >= 1);
     const auto moves = mount->count(":Me#");
     mount->clock.advance(std::chrono::seconds(7));  // past the re-send interval
@@ -1470,6 +1482,7 @@ TEST_CASE("OnStep Telescope Driver - Park reports why the mount refused it", "[o
         CHECK(std::string(ex.what()).find("no park position set") != std::string::npos);
     }
     CHECK(mount->count(":hP#") == 1);  // not a motion refusal: no retry
+    CHECK(mount->count(":Q") == 0);    // a still mount gets no stops
 
     driver->set_connected(false);
 }
@@ -1502,9 +1515,15 @@ TEST_CASE("OnStep Telescope Driver - FindHome during a MoveAxis stops the move a
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
 
     start_move(*driver, *mount, 1, 1.0);
+    const auto t0 = mount->clock.now();
     REQUIRE_NOTHROW(on_clock(*mount, [&] { driver->find_home(); }));
+    CHECK(mount->clock.now() - t0 < std::chrono::seconds(1));
     CHECK(mount->first(":Qn#") < mount->first(":hC#"));
     CHECK(mount->count(":hC#") >= 1);
+    const auto moves = mount->count(":Mn#");
+    mount->clock.advance(std::chrono::seconds(7));  // past the re-send interval
+    (void)mount->clock.wait_for_woken_settled(std::chrono::seconds(5));
+    CHECK(mount->count(":Mn#") == moves);  // the re-send ended with the move
 
     driver->set_connected(false);
 }
@@ -1554,6 +1573,184 @@ TEST_CASE("OnStep Telescope Driver - Park during a GOTO stops the GOTO and parks
     CHECK(mount->first(":Q#") < mount->first(":hP#"));
     CHECK(mount->count(":hP#") >= 1);
 
+    driver->set_connected(false);
+}
+
+// #1430 (review): OnStepX also refuses a park while a home ('h') or a pulse
+// guide ('G') runs (Park::request: guide.state != GU_NONE, a home running), so
+// Park stops those first too.
+TEST_CASE("OnStep Telescope Driver - Park during a home stops the home and parks", "[onstep][telescope][unit]") {
+    auto mount = std::make_shared<ParkHomeFake>();
+    alpacacore::test::FakeMountServer server([mount](const std::string& chunk) { return mount->reply(chunk); });
+    REQUIRE(server.ok());
+    auto driver = connect_park_home_fake(server, *mount);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+
+    {
+        std::lock_guard<std::mutex> lock(mount->mutex);
+        mount->homing = true;
+    }
+    REQUIRE_NOTHROW(on_clock(*mount, [&] { driver->park(); }));
+    CHECK(mount->first(":Q#") < mount->first(":hP#"));
+    CHECK(mount->count(":hP#") == 1);  // accepted at once: the home had ended
+
+    driver->set_connected(false);
+}
+
+TEST_CASE("OnStep Telescope Driver - Park during a pulse guide stops it and parks", "[onstep][telescope][unit]") {
+    auto mount = std::make_shared<ParkHomeFake>();
+    alpacacore::test::FakeMountServer server([mount](const std::string& chunk) { return mount->reply(chunk); });
+    REQUIRE(server.ok());
+    auto driver = connect_park_home_fake(server, *mount);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+
+    {
+        std::lock_guard<std::mutex> lock(mount->mutex);
+        mount->pulse_active = true;
+    }
+    REQUIRE_NOTHROW(on_clock(*mount, [&] { driver->park(); }));
+    CHECK(mount->first(":Q#") < mount->first(":hP#"));
+    CHECK(mount->count(":hP#") == 1);  // accepted at once: the pulse had ended
+
+    driver->set_connected(false);
+}
+
+// #1430: what the mount accepts. A home with no :GE# (firmware without it)
+// or with 25 counts as started, and a park whose reply reads '0' counts as
+// taken when :GE# says 00.
+TEST_CASE("OnStep Telescope Driver - Park and FindHome accepted without a clean reply succeed",
+          "[onstep][telescope][unit]") {
+    auto mount = std::make_shared<ParkHomeFake>();
+    alpacacore::test::FakeMountServer server([mount](const std::string& chunk) { return mount->reply(chunk); });
+    REQUIRE(server.ok());
+    auto driver = connect_park_home_fake(server, *mount);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+
+    SECTION("FindHome on firmware without :GE#") {
+        mount->has_ge = false;
+        // 1 s steps: the :GE# read waits out its 1 s timeout in real time.
+        REQUIRE_NOTHROW(on_clock(*mount, [&] { driver->find_home(); }, std::chrono::seconds(1)));
+        CHECK(mount->count(":hC#") == 1);
+    }
+    SECTION("FindHome answered 25") {
+        mount->home_ack_25 = true;
+        REQUIRE_NOTHROW(on_clock(*mount, [&] { driver->find_home(); }));
+        CHECK(mount->count(":hC#") == 1);
+    }
+    SECTION("Park answered 0 with :GE# 00") {
+        mount->park_zero_ok = true;
+        REQUIRE_NOTHROW(on_clock(*mount, [&] { driver->park(); }));
+        CHECK(mount->count(":hP#") == 1);
+    }
+    driver->set_connected(false);
+}
+
+// #1430: on firmware without 'g' only the driver knows a MoveAxis runs, so
+// Park and FindHome stop it from the driver's own flags.
+TEST_CASE("OnStep Telescope Driver - Park and FindHome stop a MoveAxis on firmware without 'g'",
+          "[onstep][telescope][unit]") {
+    auto mount = std::make_shared<ParkHomeFake>();
+    mount->sends_g = false;
+    alpacacore::test::FakeMountServer server([mount](const std::string& chunk) { return mount->reply(chunk); });
+    REQUIRE(server.ok());
+    auto driver = connect_park_home_fake(server, *mount);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+
+    SECTION("Park, axis 0") {
+        start_move(*driver, *mount, 0, 1.0);
+        REQUIRE_NOTHROW(on_clock(*mount, [&] { driver->park(); }));
+        CHECK(mount->first(":Qe#") < mount->first(":hP#"));
+    }
+    SECTION("FindHome, axis 1") {
+        start_move(*driver, *mount, 1, 1.0);
+        REQUIRE_NOTHROW(on_clock(*mount, [&] { driver->find_home(); }));
+        CHECK(mount->first(":Qn#") < mount->first(":hC#"));
+    }
+    driver->set_connected(false);
+}
+
+// #1430: a Park that stopped a GOTO drops the tracking restore that GOTO
+// carried, and Slewing reads false at once, even when the park is then
+// refused: an AbortSlew afterwards must not restart tracking.
+TEST_CASE("OnStep Telescope Driver - a GOTO stopped by Park is not resumed as a slew or a tracking restore",
+          "[onstep][telescope][unit]") {
+    auto mount = std::make_shared<ParkHomeFake>();
+    alpacacore::test::FakeMountServer server([mount](const std::string& chunk) { return mount->reply(chunk); });
+    REQUIRE(server.ok());
+    auto driver = connect_park_home_fake(server, *mount);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+
+    driver->slew_to_coordinates_async(12.0, 45.0);
+    {
+        std::lock_guard<std::mutex> lock(mount->mutex);
+        mount->refuse_code = 12;  // CE_NO_PARK_POSITION_SET, once the GOTO is stopped
+        mount->tracking = false;  // the stopped GOTO left tracking off
+    }
+    CHECK_THROWS_AS(on_clock(*mount, [&] { driver->park(); }), alpacacore::AlpacaException);
+    CHECK(mount->first(":Q#") < mount->first(":hP#"));
+    CHECK_FALSE(driver->get_slewing());  // inside the 2 s slew grace: the stop cleared it
+    REQUIRE_NOTHROW(driver->abort_slew());
+    CHECK(mount->count(":ST6") == 0);  // no tracking restore (:ST60.164275#) for the stopped GOTO
+
+    driver->set_connected(false);
+}
+
+// #1430: a newer command also ends a Park or FindHome waiting between its
+// "in motion" retries, and a Park or FindHome ends one that waits.
+TEST_CASE("OnStep Telescope Driver - a newer command ends a waiting Park or FindHome", "[onstep][telescope][unit]") {
+    auto mount = std::make_shared<ParkHomeFake>();
+    alpacacore::test::FakeMountServer server([mount](const std::string& chunk) { return mount->reply(chunk); });
+    REQUIRE(server.ok());
+    auto driver = connect_park_home_fake(server, *mount);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+
+    // Runs `first` on a thread until it waits on the clock (after `marker`),
+    // then `second` beside it on the clock, then lets `first` finish.
+    const auto overtake = [&](const std::function<void()>& first, const std::string& marker,
+                              const std::function<void()>& second) {
+        std::exception_ptr first_error;
+        std::atomic<bool> first_done{false};
+        const auto seen = mount->clock.wait_count();
+        std::thread runner([&] {
+            try {
+                first();
+            } catch (...) {
+                first_error = std::current_exception();  // Catch2 asserts only on the test thread
+            }
+            first_done = true;
+        });
+        CHECK(wait_logged(*mount, marker));
+        CHECK(mount->clock.wait_for_wait_count(seen + 1, std::chrono::seconds(5)));  // `first` waits
+        CHECK_NOTHROW(on_clock(*mount, second));
+        drive_until(*mount, first_done, seen);  // `first`'s own wait is still pending
+        runner.join();
+        CHECK_FALSE(first_error);
+    };
+
+    SECTION("an AbortSlew during the retry wait ends the Park") {
+        mount->refuse_in_motion = 1000;  // a still mount that keeps answering 22
+        std::size_t parks_before_abort = 0;
+        overtake([&] { driver->park(); }, ":GE#",
+                 [&] {
+                     driver->abort_slew();
+                     parks_before_abort = mount->count(":hP#");
+                 });
+        CHECK(mount->count(":hP#") == parks_before_abort);  // no try after the abort
+    }
+    SECTION("a FindHome ends a waiting Park") {
+        mount->brake_ms = 3000;
+        start_move(*driver, *mount, 0, 1.0);
+        overtake([&] { driver->park(); }, ":Qe#", [&] { driver->find_home(); });
+        CHECK(mount->count(":hP#") == 0);
+        CHECK(mount->count(":hC#") == 1);
+    }
+    SECTION("a Park ends a waiting FindHome") {
+        mount->brake_ms = 3000;
+        start_move(*driver, *mount, 0, 1.0);
+        overtake([&] { driver->find_home(); }, ":Qe#", [&] { driver->park(); });
+        CHECK(mount->count(":hC#") == 0);
+        CHECK(mount->count(":hP#") == 1);
+    }
     driver->set_connected(false);
 }
 
