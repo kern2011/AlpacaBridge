@@ -239,40 +239,43 @@ it is never reachable through `router.cpp` or the web UI.
   (EXTENDED)` in the timing table). Real GEM mounts physically cannot park/home in 1 second;
   fire-and-forget is the only way to pass this target with genuine hardware.
 - **Park and FindHome stop any motion first and read the answer** (#1430): OnStepX refuses a park
-  or a home while a guide move (a `MoveAxis`, or its braking), a GOTO or a home runs
+  or a home while a guide move (a `MoveAxis`, or its braking), a pulse guide, a GOTO or a home runs
   (`Park::request`, `Home::request`: `CE_SLEW_IN_MOTION`), and the driver used to send `:hP#` and
   `:hC#` blind, so a `Park` right after `MoveAxis(axis, 0)` returned success and never parked
-  (HM-17, 2026-10-20). Now, when the mount is moving, they send AbortSlew's stops and wait until
-  `:GU#` shows no `g`, `G`, GOTO or `h` (at most 6 s); `:hP#`'s bare `1`/`0` is read; `:GE#`
-  is read right after a refused `:hP#` and after every `:hC#` (any later command replaces it; checked on the HM-17:
-  `22` during braking, `25` after an accepted park, `00` after an accepted home). OnStep 4.x has
-  `:GE#` too, per channel, with the same codes up to 23 (OnStep `Globals.h` `CommandErrors`; no
-  25), and its `:hC#` stops the mount when it refuses for motion. Code 22 is retried for 3 s; any
-  other refusal throws `InvalidOperation` with the reason. A reply that is not a two-digit code
-  (firmware without `:GE#`, 1 s timeout) leaves the reason unknown: a refused park is retried,
-  then reported as "no reason given", and a home counts as started, as before. That timeout runs
-  with `mutex_` held, as every OnStep exchange does (the stops, the `:GU#` polls, `:hP#` and
-  `:GE#` too; decision 0016 rule 1, #1449): on such firmware a `FindHome` takes about 1 s
-  longer, and each refused park try as much. The code is kept per serial channel; a Smart Web
-  Server page that shares the channel can replace it between `:hP#` and `:GE#` (rare), and the
-  refusal then reads as another code. A `:hP#` answered `0` or garbled is taken as accepted when
-  `:GE#` then says 0 or 25. A link lost between `:hC#` and `:GE#` fails the read
-  (`get_last_command_error()` rethrows, so FindHome reports the loss); a mount that stops
-  answering on a link that stays up reads as firmware without `:GE#`, and the home counts as
-  started, as before. OnStep 4.x `:GU#` (`Command.ino`) has `I` (parking) but no `h`, so a
-  `FindHome` there is never taken as one already running. Every wait runs on the task clock (`clock_.sleep_for`, decision 0005) and releases `mutex_` (as `wait_for_condition_locked()` does), so getters,
-  `AbortSlew` and Disconnect answer meanwhile; after each wait `check_connected()` runs, and a
-  newer motion command (`motion_epoch_`: `MoveAxis`, `AbortSlew`, a GOTO, `Unpark`, another
-  `Park`/`FindHome`, a disconnect) ends the waiting one without sending it; a `PulseGuide` does
-  not, so a pulse sent meanwhile is waited out or reported as "in motion". A `Park` or `FindHome`
-  whose stop cannot be sent throws `DriverException` and ends the `MoveAxis` re-send, as
-  `AbortSlew` does. A mount that is
-  still parks as fast as before (HM-17: 0.15 s), within the fire-and-forget rule above. Only a
-  park or home that must first stop motion takes longer: about 1 s after a `MoveAxis` on the
-  HM-17, more after a fast GOTO is stopped, so ConformU can note it as a timing issue there. That
-  is the price of reporting a refusal to the client: returning at once and parking from a
-  background body would leave a refused park silent again (#1430). A `Park` while one runs
-  (`I`), or a `FindHome` while one runs (`h`), is a no-op.
+  (HM-17, 2026-10-20). Both stay asynchronous initiators (the fire-and-forget rule above, the
+  contract sweep's 1 s bound):
+  - **On a still mount** the call sends `:hP#` (reads its bare `1`/`0`) or `:hC#` (no reply), then
+    `:GE#` right after a refused `:hP#` and after every `:hC#` (any later command replaces the code;
+    checked on the HM-17: `22` during braking, `25` after an accepted park, `00` after an accepted
+    home), and returns; a refusal a retry cannot change (no park position set, outside limits)
+    throws `InvalidOperation` with the reason from the call (HM-17: 0.15 s).
+  - **When the mount moves** (the driver's `MoveAxis` flags, or `:GU#` showing `g`, `G`, a GOTO or
+    `h`) the call sends AbortSlew's stops and returns (a stop that cannot be sent throws
+    `DriverException` and ends the `MoveAxis` re-send, as `AbortSlew` does). An `AsyncOperation`
+    (`park_home_`) then polls `:GU#` every 100 ms until the mount is still (at most 6 s) and sends
+    the park or home. `Slewing` reads true meanwhile.
+  - **Code 22 is retried** every 200 ms for 3 s in that task, also when the first try on a still mount
+    met it. A refusal the task meets is kept and raised by `Slewing`, and by `AtPark` (a park's) or
+    `AtHome` (a home's), until the next motion command (`MoveAxis`, `AbortSlew`, a GOTO, `Unpark`,
+    `Park`, `FindHome`) or a reconnect clears it; those also end a task still running, without
+    sending anything (the shared rule "A failed async operation body keeps its error"). A
+    `PulseGuide` does not.
+  - **`:GE#` details:** OnStep 4.x has `:GE#` too, per channel, with the same codes up to 23
+    (OnStep `Globals.h` `CommandErrors`; no 25), and its `:hC#` stops the mount when it refuses for
+    motion. A reply that is not a two-digit code (firmware without `:GE#`, 1 s timeout) leaves the
+    reason unknown: a refused park is retried, then reported as "no reason given", and a home
+    counts as started, as before. A `:hP#` answered `0` or garbled is taken as accepted when `:GE#`
+    then says 0 or 25. The code is kept per serial channel; a Smart Web Server page that shares
+    the channel can replace it between `:hP#` and `:GE#` (rare). A link lost between `:hC#` and
+    `:GE#` fails the read (`get_last_command_error()` rethrows); a mount that stops answering on a
+    link that stays up reads as firmware without `:GE#`, and the home counts as started, as before.
+    OnStep 4.x `:GU#` (`Command.ino`) has `I` (parking) but no `h`, so a `FindHome` there is never
+    taken as one already running.
+  - **Locks and clock:** the task waits on the driver's task clock (decision 0005) with `mutex_`
+    released, so getters, `AbortSlew` and Disconnect answer meanwhile. The stops, the `:GU#` polls,
+    `:hP#` and `:GE#` (up to 1 s each without a reply; on firmware without `:GE#` a `FindHome` takes
+    about 1 s longer) and `:hC#` hold `mutex_`, as every OnStep exchange does (decision 0016 rule 1,
+    #1449). A `Park` while one runs (`I`), or a `FindHome` while one runs (`h`), is a no-op.
 - **A slow first post-Connect `DeviceState` means the connect did not run** (#1242). A
   ConformU-style preamble from one ClientID (`Connected=True` → `Connected=False` → `Connect()`,
   poll `Connecting`) gets its first `DeviceState` in 3-5 ms with no serial reads: the connect's
