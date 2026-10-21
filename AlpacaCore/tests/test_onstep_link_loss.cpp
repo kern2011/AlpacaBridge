@@ -317,6 +317,24 @@ TEST_CASE("OnStep link loss - a reply cut off by the unplug fails NotConnected b
     CHECK(protocol.consume_link_lost_at().has_value());
 }
 
+// #1430: FindHome reads :GE# right after :hC#. A link lost in between must
+// fail that read (NotConnected), not read as "no code": FindHome would then
+// report success on a dead link.
+TEST_CASE("OnStep link loss - a link lost before the :GE# read fails it instead of reading no code",
+          "[onstep][serial][connected]") {
+    WrapperReset reset;
+    FakeOnStepSerialMount mount;
+    PortLink link(mount.slave_path());
+    auto& protocol = OnStepProtocolWrapper::instance();
+    REQUIRE(protocol.connect(serial_info(link)));
+    REQUIRE(protocol.link_alive());
+
+    mount.sever_on(":GE#");
+    protocol.find_home();
+    require_not_connected_error([&] { (void)protocol.get_last_command_error(); });
+    CHECK_FALSE(protocol.link_alive());
+}
+
 TEST_CASE("OnStep link loss - Connected=true on a lost link reconnects instead of short-circuiting",
           "[onstep][serial][connected]") {
     WrapperReset reset;

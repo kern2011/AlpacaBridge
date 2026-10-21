@@ -1481,7 +1481,10 @@ private:
     // Each wait releases mutex_, as wait_for_condition_locked() does, so
     // getters, AbortSlew and Disconnect are not blocked; after it,
     // check_connected() (which notices a pulled adapter) runs and a newer
-    // motion command (motion_epoch_ moved on) ends this one: false.
+    // motion command (motion_epoch_ moved on) ends this one: false. The stops
+    // and each :GU# poll hold mutex_, as every OnStep exchange does; decision
+    // 0016 rule 1 calls that a defect, and moving OnStep's I/O off mutex_ is
+    // #1449.
     bool stop_motion_before_park_or_home_locked(std::unique_lock<std::mutex>& lock, const char* who,
                                                 std::uint64_t epoch) {
         const auto moving = [this] {
@@ -1543,7 +1546,9 @@ private:
     // error. Without a code (firmware without :GE#) a refused park is retried
     // for the same window, as its reason is unknown, and a home counts as
     // started, as before. False when a newer motion command took over during
-    // a retry wait.
+    // a retry wait. :hP# and :GE# (up to 1 s each without a reply) and :hC#
+    // hold mutex_, as every OnStep exchange does; moving that off mutex_ is
+    // #1449 (decision 0016 rule 1).
     bool send_park_or_home_locked(std::unique_lock<std::mutex>& lock, const char* who, bool home, std::uint64_t epoch) {
         auto& protocol = OnStepProtocolWrapper::instance();
         const auto deadline = clock_.now() + kInMotionRetryWindow;

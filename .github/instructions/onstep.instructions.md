@@ -250,12 +250,16 @@ it is never reachable through `router.cpp` or the web UI.
   other refusal throws `InvalidOperation` with the reason. A reply that is not a two-digit code
   (firmware without `:GE#`, 1 s timeout) leaves the reason unknown: a refused park is retried,
   then reported as "no reason given", and a home counts as started, as before. That timeout runs
-  with `mutex_` held, as every serial exchange does: on such firmware a `FindHome` takes about 1 s
+  with `mutex_` held, as every OnStep exchange does (the stops, the `:GU#` polls, `:hP#` and
+  `:GE#` too; decision 0016 rule 1, #1449): on such firmware a `FindHome` takes about 1 s
   longer, and each refused park try as much. The code is kept per serial channel; a Smart Web
   Server page that shares the channel can replace it between `:hP#` and `:GE#` (rare), and the
   refusal then reads as another code. A `:hP#` answered `0` or garbled is taken as accepted when
-  `:GE#` then says 0 or 25. Not covered by a test: a link lost between `:hC#` and `:GE#`
-  (`get_last_command_error()` rethrows then, so FindHome reports the loss). Every wait runs on the task clock (`clock_.sleep_for`, decision 0005) and releases `mutex_` (as `wait_for_condition_locked()` does), so getters,
+  `:GE#` then says 0 or 25. A link lost between `:hC#` and `:GE#` fails the read
+  (`get_last_command_error()` rethrows, so FindHome reports the loss); a mount that stops
+  answering on a link that stays up reads as firmware without `:GE#`, and the home counts as
+  started, as before. OnStep 4.x `:GU#` (`Command.ino`) has `I` (parking) but no `h`, so a
+  `FindHome` there is never taken as one already running. Every wait runs on the task clock (`clock_.sleep_for`, decision 0005) and releases `mutex_` (as `wait_for_condition_locked()` does), so getters,
   `AbortSlew` and Disconnect answer meanwhile; after each wait `check_connected()` runs, and a
   newer motion command (`motion_epoch_`: `MoveAxis`, `AbortSlew`, a GOTO, `Unpark`, another
   `Park`/`FindHome`, a disconnect) ends the waiting one without sending it. A mount that is
