@@ -1167,6 +1167,7 @@ struct ParkHomeFake {
     bool tracking = true;       // false: 'n' in :GU#
     bool home_ack_25 = false;   // :hC# accepted with :GE# 25 instead of 0
     bool park_zero_ok = false;  // :hP# accepted, reply reads '0', :GE# 00
+    std::string ge_reply;       // non-empty: :GE# answers this instead of the code
     int brake_ms = 300;
     // Every driver timer and this fake's braking run on it (decision 0005).
     alpacacore::test::FakeTaskClock clock;
@@ -1219,6 +1220,7 @@ struct ParkHomeFake {
         log.push_back(chunk);
         if (chunk.rfind(":GE", 0) == 0) {
             if (!has_ge) return "0";
+            if (!ge_reply.empty()) return ge_reply;
             char buf[8];
             std::snprintf(buf, sizeof(buf), "%02d#", last_error);
             return buf;
@@ -1630,6 +1632,11 @@ TEST_CASE("OnStep Telescope Driver - Park and FindHome accepted without a clean 
         mount->has_ge = false;
         // 1 s steps: the :GE# read waits out its 1 s timeout in real time.
         REQUIRE_NOTHROW(on_clock(*mount, [&] { driver->find_home(); }, std::chrono::seconds(1)));
+        CHECK(mount->count(":hC#") == 1);
+    }
+    SECTION("FindHome whose :GE# reply is not a two-digit code") {
+        mount->ge_reply = "E1#";
+        REQUIRE_NOTHROW(on_clock(*mount, [&] { driver->find_home(); }));
         CHECK(mount->count(":hC#") == 1);
     }
     SECTION("FindHome answered 25") {

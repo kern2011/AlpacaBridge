@@ -1280,7 +1280,7 @@ private:
 
     // Ends the driver's record of a MoveAxis and its re-send (#1378).
     // cancel() may be called with mutex_ held (async_operation.h rule 10).
-    // Slews, Park and AbortSlew end the re-send here with cancel() rather
+    // Slews, Park, FindHome and AbortSlew end the re-send here with cancel() rather
     // than a supersede (decision 0006 rule 3): safe, because the body checks
     // ctx.stop_reason() under mutex_ before it sends anything, and these
     // callers hold mutex_.

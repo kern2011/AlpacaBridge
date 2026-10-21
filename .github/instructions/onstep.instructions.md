@@ -99,7 +99,7 @@ it is never reachable through `router.cpp` or the web UI.
   after `GUIDE_TIME_LIMIT` (default 10 s; 1-120 s, or 0 for none, set at firmware build), and every
   repeat restarts that timer (`Guide::startAxis1`). A background task (`move_axis_resend_`, an
   `AsyncOperation`) re-sends the rate and direction of each running axis until `MoveAxis(axis, 0)`,
-  `AbortSlew`, a GOTO, park, disconnect, a lost link, or the mount ending the move (below); a stop request ends the re-send even when the stop
+  `AbortSlew`, a GOTO, `Park`, `FindHome`, disconnect, a lost link, or the mount ending the move (below); a stop request ends the re-send even when the stop
   itself fails. Each axis is due 7 s after its `MoveAxis`, then 7 s after the end of each tick
   that was due for it, whether that tick sent or skipped (OnStepX times each axis on its own), so a
   `MoveAxis` on the other axis, which replaces the body, never delays it, and `mutex_` is free
