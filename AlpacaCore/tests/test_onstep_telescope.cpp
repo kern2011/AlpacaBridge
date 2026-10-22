@@ -1332,8 +1332,8 @@ TEST_CASE("OnStep Telescope Driver - Park during a MoveAxis stops the move and p
     REQUIRE(mount->first_try_at);
     // Braking ends at 300 ms; with 100 ms polls the park goes out at the first
     // poll that finds the mount still.
-    CHECK(*mount->first_try_at - t0 < std::chrono::milliseconds(400));
-    CHECK(mount->first(":Qe#") < mount->first(":hP#"));        // stopped before the park
+    CHECK(mount->first_try_at.value_or(t0 + std::chrono::hours(1)) - t0 < std::chrono::milliseconds(400));
+    CHECK(mount->first(":Qe#") < mount->first(":hP#"));  // stopped before the park
     CHECK(mount->count(":hP#") >= 1);
     const auto moves = mount->count(":Me#");
     mount->clock.advance(std::chrono::seconds(7));  // past the re-send interval
@@ -1463,7 +1463,7 @@ TEST_CASE("OnStep Telescope Driver - FindHome during a MoveAxis stops the move a
     const auto t0 = mount->clock.now();
     REQUIRE_NOTHROW(on_clock(*mount, *driver, [&] { driver->find_home(); }));
     REQUIRE(mount->first_try_at);
-    CHECK(*mount->first_try_at - t0 < std::chrono::seconds(1));
+    CHECK(mount->first_try_at.value_or(t0 + std::chrono::hours(1)) - t0 < std::chrono::seconds(1));
     CHECK(mount->first(":Qn#") < mount->first(":hC#"));
     CHECK(mount->count(":hC#") >= 1);
     const auto moves = mount->count(":Mn#");
