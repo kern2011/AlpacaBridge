@@ -1826,6 +1826,30 @@ TEST_CASE("OnStep Telescope Driver - a newer command before Park's background pa
     driver->set_connected(false);
 }
 
+// #1430: a newer FindHome whose start() lands before the older Park's still
+// homes: the body started last runs the newer request.
+TEST_CASE("OnStep Telescope Driver - a FindHome started before an older Park's background part still homes",
+          "[onstep][telescope][unit]") {
+    auto mount = std::make_shared<ParkHomeFake>();
+    mount->brake_ms = 3000;
+    alpacacore::test::FakeMountServer server([mount](const std::string& chunk) { return mount->reply(chunk); });
+    REQUIRE(server.ok());
+    auto driver = connect_park_home_fake(server, *mount);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+    start_move(*driver, *mount, 0, 1.0);
+    alpacacore::vendor::onstep::set_park_home_before_start_for_testing(*driver, [&] {
+        alpacacore::vendor::onstep::set_park_home_before_start_for_testing(*driver, nullptr);
+        driver->find_home();  // runs to its own start() inside the Park's gap
+    });
+
+    REQUIRE_NOTHROW(driver->park());
+    REQUIRE(driver->get_slewing());
+    run_clock(*mount, std::chrono::seconds(10));
+    CHECK(mount->count(":hC#") == 1);  // the FindHome won
+    CHECK(mount->count(":hP#") == 0);
+    driver->set_connected(false);
+}
+
 TEST_CASE("OnStep Telescope Driver - an AbortSlew between Park's in-motion retries ends it",
           "[onstep][telescope][unit]") {
     auto mount = std::make_shared<ParkHomeFake>();

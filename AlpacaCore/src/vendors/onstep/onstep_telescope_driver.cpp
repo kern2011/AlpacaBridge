@@ -823,7 +823,7 @@ public:
     bool get_slewing() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
-        if (park_home_pending_) {
+        if (park_home_request_) {
             return true;  // stopping, settling or retrying a Park or FindHome (#1430)
         }
         raise_park_home_error_locked(std::nullopt);
@@ -1490,17 +1490,26 @@ private:
             return;
         }
         // Decision 0006 rule 3: claimed under mutex_ before the unlock, so a
-        // newer motion command in the gap before start() still ends this one
-        // (the body checks the claim), and Slewing reads true from here on.
-        park_home_pending_ = true;
-        const auto before_start = park_home_before_start_;  // test seam, read under mutex_
+        // newer motion command in the gap before start() still ends this one,
+        // and Slewing reads true from here on. The body runs whatever request
+        // is current when it starts, so a newer Park or FindHome whose start()
+        // lands first is still carried out by the body started last.
+        park_home_request_ = ParkHomeRequest{claim, who, home, stopped, code};
+        // Test seam, read under mutex_.
+        const auto before_start = park_home_before_start_;
         lock.unlock();  // start() without mutex_: decision 0006 rule 4
         if (before_start) {
             before_start();  // lands a call in the gap
         }
-        park_home_.start([this, who, home, stopped, code, claim](util::OperationContext& ctx) {
-            run_park_or_home(ctx, who, home, stopped, code, claim);
-        });
+        try {
+            park_home_.start([this](util::OperationContext& ctx) { run_park_or_home(ctx); });
+        } catch (const AlpacaException&) {
+            lock.lock();
+            if (park_home_request_ && park_home_request_->claim == claim) {
+                park_home_request_.reset();  // no body will finish it
+            }
+            throw;
+        }
     }
 
     bool moving_locked() const {
@@ -1591,12 +1600,18 @@ private:
 
     // The park_home_ body: settle (when the call sent stops), then send and
     // retry. Waits on the task clock with mutex_ released (decision 0005).
-    void run_park_or_home(util::OperationContext& ctx, const char* who, bool home, bool settle, int code,
-                          std::uint64_t claim) {
+    void run_park_or_home(util::OperationContext& ctx) {
         std::unique_lock<std::mutex> lock(mutex_);
-        run_park_or_home_locked(lock, ctx, who, home, settle, code, claim);
-        if (park_home_claim_ == claim) {
-            park_home_pending_ = false;  // done; a newer claim already cleared it
+        if (!park_home_request_) {
+            return;  // superseded, or carried out by an earlier body
+        }
+        const ParkHomeRequest request = *park_home_request_;
+        run_park_or_home_locked(lock, ctx, request.who, request.home, request.stopped, request.code, request.claim);
+        // Done, unless a newer start() superseded this body: the body it
+        // started runs the request. A newer claim already replaced it.
+        if (ctx.stop_reason() != util::StopReason::Superseded && park_home_request_ &&
+            park_home_request_->claim == request.claim) {
+            park_home_request_.reset();
         }
     }
 
@@ -1658,7 +1673,7 @@ private:
     void supersede_park_or_home_locked() {
         park_home_error_.reset();
         ++park_home_claim_;
-        park_home_pending_ = false;
+        park_home_request_.reset();
         park_home_.cancel();
     }
 
@@ -2120,10 +2135,17 @@ private:
     };
     std::optional<KeptParkHomeError> park_home_error_;
     // The current Park/FindHome's claim (decision 0006 rule 3), bumped by
-    // every supersede, and whether its background part is still to finish.
-    // Under mutex_.
+    // every supersede, and the request its background part is still to
+    // finish. Under mutex_.
+    struct ParkHomeRequest {
+        std::uint64_t claim;
+        const char* who;
+        bool home;
+        bool stopped;
+        int code;
+    };
     std::uint64_t park_home_claim_ = 0;
-    bool park_home_pending_ = false;
+    std::optional<ParkHomeRequest> park_home_request_;
     // Test seam: runs between the unlock and park_home_.start(). Set only
     // while no Park or FindHome is in flight.
     std::function<void()> park_home_before_start_;
