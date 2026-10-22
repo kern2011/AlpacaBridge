@@ -24,7 +24,7 @@ still throws instead of silently never reaching `AtPark`. Drivers with native pa
 that return at once (iOptron `:MP1#`, OnStep `:hP#`, ZWO `:hP#`) need no task (OnStep has one only
 for a park or home that must first stop a running motion: OnStepX refuses it while an axis moves
 or brakes, so the call sends the stops and returns, and a task waits for the mount to be still and
-parks, keeping a refusal for `Slewing`/`AtPark`, #1430) — verified
+parks, keeping a refusal for `Slewing`/`AtPark`/`AtHome`, #1430) — verified
 on the iOptron HAE29C with ConformU 4.5.0 (Park 11.5 s of motion, initiator well under 1 s).
 `MoveAxis(axis, 0)` must likewise send the stop and return; only add a background
 stop-completion task (SkyWatcher) when the mount has a deceleration ramp longer than the
