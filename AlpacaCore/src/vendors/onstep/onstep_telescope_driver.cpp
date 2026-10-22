@@ -1644,12 +1644,12 @@ private:
         auto& protocol = OnStepProtocolWrapper::instance();
         if (home) {
             protocol.find_home();
-            code = protocol.get_last_command_error().value_or(kCeNone);
+            code = last_command_error_locked(who).value_or(kCeNone);
         } else {
             if (protocol.park()) {
                 return true;
             }
-            code = protocol.get_last_command_error().value_or(-1);
+            code = last_command_error_locked(who).value_or(-1);
         }
         if (code == kCeNone || code == kCeTrue) {
             return true;  // for a park: the reply was lost or garbled, but the mount took it
@@ -1658,6 +1658,28 @@ private:
             throw park_or_home_refused(who, code);
         }
         return false;
+    }
+
+    // :GE# with no code is firmware without it, or a mount that stopped
+    // answering (#1414): a :GU# read tells them apart. A silent mount counts
+    // as a failed read toward the link fault, and the park or home fails
+    // instead of reading as accepted.
+    std::optional<int> last_command_error_locked(const char* who) {
+        auto& protocol = OnStepProtocolWrapper::instance();
+        if (const auto code = protocol.get_last_command_error()) {
+            return code;
+        }
+        try {
+            cached_status_ = protocol.get_status();
+            status_cache_valid_ = true;
+            last_status_update_ = clock_.now();
+            note_read_ok_locked();
+        } catch (const std::exception& ex) {
+            note_read_failure_locked(ex);  // throws once the fault latched or the link went
+            throw AlpacaException(std::string(who) + ": the mount did not answer after the command (" + ex.what() + ")",
+                                  AlpacaError::DriverException);
+        }
+        return std::nullopt;
     }
 
     static AlpacaException park_or_home_refused(const char* who, int code) {
@@ -2011,19 +2033,26 @@ private:
             ALPACA_LOG_WARN("OnStep", "Mount read failed (" + std::to_string(link_health_.consecutive_failures()) +
                                           " in a row): " + ex.what());
         }
-        if (link_health_.fault_stale(now, util::kLinkStalenessBound)) {
-            const std::string reason =
-                "no reply for " +
-                std::to_string(std::chrono::duration_cast<std::chrono::seconds>(util::kLinkStalenessBound).count()) +
-                " s: " + link_health_.fault();
-            OnStepProtocolWrapper::instance().declare_link_lost(reason);  // Connected now reads false
-            throw AlpacaException("OnStep link lost (" + reason + "); set Connected true to reconnect",
-                                  AlpacaError::NotConnected);
-        }
+        lose_link_if_stale_locked(now);
         if (link_health_.faulted()) {
             throw AlpacaException("OnStep mount communications compromised: " + link_health_.fault(),
                                   AlpacaError::DriverException);
         }
+    }
+
+    // A fault that has stood past util::kLinkStalenessBound is a lost link:
+    // the wrapper closes the port and this throws NotConnected.
+    void lose_link_if_stale_locked(std::chrono::steady_clock::time_point now) const {
+        if (!link_health_.fault_stale(now, util::kLinkStalenessBound)) {
+            return;
+        }
+        const std::string reason =
+            "no reply for " +
+            std::to_string(std::chrono::duration_cast<std::chrono::seconds>(util::kLinkStalenessBound).count()) +
+            " s: " + link_health_.fault();
+        OnStepProtocolWrapper::instance().declare_link_lost(reason);  // Connected now reads false
+        throw AlpacaException("OnStep link lost (" + reason + "); set Connected true to reconnect",
+                              AlpacaError::NotConnected);
     }
 
     // Decision 0009 rule 1: while the fault is latched, writes throw as reads
@@ -2033,6 +2062,9 @@ private:
     // and call this after, so the stop is still tried (#1414).
     void refuse_while_faulted_locked(const char* what) const {
         if (link_health_.faulted()) {
+            // A client that only writes still sees the link lost once the
+            // fault has stood past the bound, as a read would (#1414).
+            lose_link_if_stale_locked(clock_.now());
             throw AlpacaException(
                 std::string(what) + ": OnStep mount communications compromised: " + link_health_.fault(),
                 AlpacaError::DriverException);

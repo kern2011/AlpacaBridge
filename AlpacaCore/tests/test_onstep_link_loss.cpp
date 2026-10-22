@@ -35,6 +35,7 @@
 #include <condition_variable>
 #include <filesystem>
 #include <functional>
+#include <map>
 #include <mutex>
 #include <string>
 #include <system_error>
@@ -85,6 +86,18 @@ public:
     /// unpowered, cable pulled at the mount end; #1414): the port stays open
     /// and healthy, commands are read and logged, nothing is answered.
     void mute(bool muted) { muted_.store(muted); }
+
+    /// Goes silent when `command` arrives, without answering it.
+    void mute_on(const std::string& command) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        mute_on_ = command;
+    }
+
+    /// Answers `command` with `reply` instead of the default.
+    void set_reply(const std::string& command, const std::string& reply) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        replies_[command] = reply;
+    }
 
     /// Unplug in the middle of an exchange: when `command` arrives the fake
     /// closes the pty instead of replying, so the driver is already reading.
@@ -153,10 +166,17 @@ private:
                 const std::string cmd = pending.substr(0, end + 1);
                 pending.erase(0, end + 1);
                 bool cut = false;
+                std::string reply = reply_to(cmd);
                 {
                     std::lock_guard<std::mutex> lock(mutex_);
                     commands_.push_back(cmd);
                     cut = !sever_on_.empty() && cmd == sever_on_;
+                    if (!mute_on_.empty() && cmd == mute_on_) {
+                        muted_.store(true);
+                    }
+                    if (const auto it = replies_.find(cmd); it != replies_.end()) {
+                        reply = it->second;
+                    }
                 }
                 if (cut) {
                     // Let the driver reach its read() first, so the hang-up
@@ -168,7 +188,6 @@ private:
                 if (muted_.load()) {
                     continue;
                 }
-                const std::string reply = reply_to(cmd);
                 if (const int hold = hold_ms_.load(); hold > 0) {
                     std::this_thread::sleep_for(std::chrono::milliseconds(hold));
                 }
@@ -184,6 +203,8 @@ private:
     std::atomic<int> hold_ms_{0};
     std::atomic<bool> muted_{false};
     mutable std::mutex mutex_;
+    std::string mute_on_;                         // under mutex_
+    std::map<std::string, std::string> replies_;  // under mutex_
     std::vector<std::string> commands_;
     std::string sever_on_;
     std::thread worker_;
@@ -1041,5 +1062,71 @@ TEST_CASE("OnStep link loss - a fault standing past the staleness bound loses th
     // long outage sends the #521 stops.
     CHECK(mount.received_any_stop());
 
+    driver->set_connected(false);
+}
+
+// #1414: a client that only writes after the fault latched still sees the
+// link lost once the fault has stood past the bound, as a read would.
+TEST_CASE("OnStep link loss - a write refused past the staleness bound loses the link", "[onstep][serial][connected]") {
+    WrapperReset reset;
+    alpacacore::test::FakeTaskClock clock;
+    FakeOnStepSerialMount mount;
+    PortLink link(mount.slave_path());
+    auto driver = alpacacore::vendor::onstep::create_onstep_telescope(0, quick_serial_info(link), clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    mount.mute(true);
+    clock.advance(std::chrono::milliseconds(2100));  // past the 2 s position cache
+    for (int i = 0; i < 3; ++i) {
+        try {
+            (void)driver->get_right_ascension();
+        } catch (const alpacacore::AlpacaException&) {  // NOLINT(bugprone-empty-catch)
+            // the third throws: the fault latched
+        }
+    }
+    REQUIRE(driver->get_connected());
+    try {
+        driver->set_tracking(true);
+        FAIL("a write while faulted returned success");
+    } catch (const alpacacore::AlpacaException& ex) {
+        CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);  // faulted, not yet stale
+    }
+    clock.advance(alpacacore::util::kLinkStalenessBound + std::chrono::seconds(1));  // no reads meanwhile
+    require_not_connected_error([&] { driver->set_tracking(true); });
+    CHECK_FALSE(driver->get_connected());
+    CHECK(driver->get_link_fault().find("lost") != std::string::npos);
+}
+
+// #1414 (Diego's decision 0009 note on #1494): a mount that goes silent after
+// :hC# leaves the :GE# read with no code, which firmware without :GE# does
+// too. A :GU# read tells them apart: a silent mount fails FindHome instead
+// of reporting it accepted.
+TEST_CASE("OnStep link loss - FindHome fails when the mount goes silent after :hC#", "[onstep][serial][connected]") {
+    WrapperReset reset;
+    FakeOnStepSerialMount mount;
+    mount.set_reply(":GU#", "nNpEo190#");  // not at home
+    PortLink link(mount.slave_path());
+    auto driver = alpacacore::vendor::onstep::create_onstep_telescope(0, quick_serial_info(link));
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    SECTION("a silent mount") {
+        mount.mute_on(":hC#");
+        try {
+            driver->find_home();
+            FAIL("FindHome reported success to a mount that stopped answering");
+        } catch (const alpacacore::AlpacaException& ex) {
+            CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
+            CHECK(std::string(ex.what()).find("did not answer") != std::string::npos);
+        }
+        CHECK(mount.received(":GE#"));
+        CHECK(driver->get_connected());  // one failed read: not yet a fault
+    }
+    SECTION("firmware without :GE# still homes") {
+        mount.set_reply(":hC#", "");
+        mount.set_reply(":GE#", "");  // no reply: the read times out
+        REQUIRE_NOTHROW(driver->find_home());
+    }
     driver->set_connected(false);
 }

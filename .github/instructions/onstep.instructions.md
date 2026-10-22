@@ -236,7 +236,9 @@ it is never reachable through `router.cpp` or the web UI.
   raw `command_blind`/`command_bool` pass-through): the commands are blind, so on a
   healthy fd they cannot fail and would otherwise report success to a mount that is not
   listening. `AbortSlew` and `MoveAxis(axis, 0)` send their stops first and then throw, so the stop
-  is still tried and the client learns it may not have arrived. A fault that has
+  is still tried and the client learns it may not have arrived; a new `MoveAxis` move is refused
+  before it ends a waiting `Park` or `FindHome`. A refused write checks the staleness bound too,
+  so a client that only writes still sees the link lost. A fault that has
   stood for `util::kLinkStalenessBound` (30 s, on the driver's task clock; tests advance a
   `FakeTaskClock`) is a lost link: `OnStepProtocolWrapper::declare_link_lost()` records the reason and the
   loss time and closes the port, as for a pulled adapter, so `Connected` reads false, calls throw
@@ -304,8 +306,10 @@ it is never reachable through `router.cpp` or the web UI.
     counts as started, as before. A `:hP#` answered `0` or garbled is taken as accepted when `:GE#`
     then says 0 or 25. The code is kept per serial channel; a Smart Web Server page that shares
     the channel can replace it between `:hP#` and `:GE#` (rare). A link lost between `:hC#` and
-    `:GE#` fails the read (`get_last_command_error()` rethrows); a mount that stops answering on a
-    link that stays up reads as firmware without `:GE#`, and the home counts as started, as before.
+    `:GE#` fails the read (`get_last_command_error()` rethrows). A `:GE#` with no code is followed
+    by a `:GU#` read (#1414): firmware without `:GE#` answers it and the park or home goes on as
+    above; a mount that stops answering on a link that stays up does not, so the read counts toward
+    the link fault and `Park`/`FindHome` throw `DriverException` instead of reading as started.
     OnStep 4.x `:GU#` (`Command.ino`) has `I` (parking) but no `h`, so a `FindHome` there is never
     taken as one already running.
   - **Locks and clock:** the task waits on the driver's task clock (decision 0005) with `mutex_`
