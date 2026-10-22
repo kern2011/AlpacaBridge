@@ -1804,6 +1804,28 @@ TEST_CASE("OnStep Telescope Driver - a newer command ends a Park still finishing
     driver->set_connected(false);
 }
 
+// #1430, decision 0006 rule 3: Park claims its background part under the
+// driver lock, before it releases it. A newer command that lands between the
+// release and the task's start (another client's AbortSlew) still ends it.
+TEST_CASE("OnStep Telescope Driver - a newer command before Park's background part starts still ends it",
+          "[onstep][telescope][unit]") {
+    auto mount = std::make_shared<ParkHomeFake>();
+    mount->brake_ms = 3000;
+    alpacacore::test::FakeMountServer server([mount](const std::string& chunk) { return mount->reply(chunk); });
+    REQUIRE(server.ok());
+    auto driver = connect_park_home_fake(server, *mount);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+    start_move(*driver, *mount, 0, 1.0);
+    alpacacore::vendor::onstep::set_park_home_before_start_for_testing(*driver, [&] { driver->abort_slew(); });
+
+    REQUIRE_NOTHROW(driver->park());
+    alpacacore::vendor::onstep::set_park_home_before_start_for_testing(*driver, nullptr);
+    run_clock(*mount, std::chrono::seconds(10));
+    CHECK(mount->count(":hP#") == 0);  // the AbortSlew won
+    CHECK_FALSE(driver->get_slewing());
+    driver->set_connected(false);
+}
+
 TEST_CASE("OnStep Telescope Driver - an AbortSlew between Park's in-motion retries ends it",
           "[onstep][telescope][unit]") {
     auto mount = std::make_shared<ParkHomeFake>();

@@ -211,9 +211,9 @@ public:
 
     ~OnStepTelescopeDriver() override {
         // MUST be first, before members the async connection task touches
-        // are destroyed (AsyncConnectable base contract). The only other
-        // worker is the MoveAxis re-send (#1378), joined next without mutex_
-        // (it takes mutex_ to send).
+        // are destroyed (AsyncConnectable base contract). The other workers,
+        // the MoveAxis re-send (#1378) and the Park/FindHome tail (#1430),
+        // are joined next without mutex_ (they take mutex_ to send).
         shutdown_connection();
         move_axis_resend_.cancel_all_and_join();
         park_home_.cancel_all_and_join();
@@ -823,7 +823,7 @@ public:
     bool get_slewing() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
-        if (park_home_.running()) {
+        if (park_home_pending_) {
             return true;  // stopping, settling or retrying a Park or FindHome (#1430)
         }
         raise_park_home_error_locked(std::nullopt);
@@ -1249,6 +1249,11 @@ public:
         throw AlpacaException("SyncToAltAz not supported", AlpacaError::MethodNotImplemented);
     }
 
+    void set_park_home_before_start_for_testing(std::function<void()> hook) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        park_home_before_start_ = std::move(hook);
+    }
+
 private:
     void check_connected() const {
         if (!connected_) {
@@ -1477,15 +1482,24 @@ private:
     // moving OnStep's I/O off mutex_ is #1449.
     void start_park_or_home_locked(std::unique_lock<std::mutex>& lock, const char* who, bool home) {
         supersede_park_or_home_locked();
+        const std::uint64_t claim = park_home_claim_;
         const bool stopped = stop_motion_before_park_or_home_locked(who);
         int code = -1;
         if (!stopped && try_park_or_home_locked(who, home, code)) {
             finish_park_or_home_locked(home);
             return;
         }
+        // Decision 0006 rule 3: claimed under mutex_ before the unlock, so a
+        // newer motion command in the gap before start() still ends this one
+        // (the body checks the claim), and Slewing reads true from here on.
+        park_home_pending_ = true;
+        const auto before_start = park_home_before_start_;  // test seam, read under mutex_
         lock.unlock();  // start() without mutex_: decision 0006 rule 4
-        park_home_.start([this, who, home, stopped, code](util::OperationContext& ctx) {
-            run_park_or_home(ctx, who, home, stopped, code);
+        if (before_start) {
+            before_start();  // lands a call in the gap
+        }
+        park_home_.start([this, who, home, stopped, code, claim](util::OperationContext& ctx) {
+            run_park_or_home(ctx, who, home, stopped, code, claim);
         });
     }
 
@@ -1577,9 +1591,21 @@ private:
 
     // The park_home_ body: settle (when the call sent stops), then send and
     // retry. Waits on the task clock with mutex_ released (decision 0005).
-    void run_park_or_home(util::OperationContext& ctx, const char* who, bool home, bool settle, int code) {
+    void run_park_or_home(util::OperationContext& ctx, const char* who, bool home, bool settle, int code,
+                          std::uint64_t claim) {
         std::unique_lock<std::mutex> lock(mutex_);
-        const auto still_ours = [&] { return ctx.stop_reason() == util::StopReason::None && connected_; };
+        run_park_or_home_locked(lock, ctx, who, home, settle, code, claim);
+        if (park_home_claim_ == claim) {
+            park_home_pending_ = false;  // done; a newer claim already cleared it
+        }
+    }
+
+    // The steps of the body; returns with `lock` held.
+    void run_park_or_home_locked(std::unique_lock<std::mutex>& lock, util::OperationContext& ctx, const char* who,
+                                 bool home, bool settle, int code, std::uint64_t claim) {
+        const auto still_ours = [&] {
+            return ctx.stop_reason() == util::StopReason::None && connected_ && park_home_claim_ == claim;
+        };
         const auto wait = [&](std::chrono::milliseconds d) {
             lock.unlock();
             const bool woke = ctx.wait_for(d);
@@ -1631,6 +1657,8 @@ private:
     // dropped. cancel() never blocks, so mutex_ may be held (rule 10).
     void supersede_park_or_home_locked() {
         park_home_error_.reset();
+        ++park_home_claim_;
+        park_home_pending_ = false;
         park_home_.cancel();
     }
 
@@ -2091,6 +2119,14 @@ private:
         int code;
     };
     std::optional<KeptParkHomeError> park_home_error_;
+    // The current Park/FindHome's claim (decision 0006 rule 3), bumped by
+    // every supersede, and whether its background part is still to finish.
+    // Under mutex_.
+    std::uint64_t park_home_claim_ = 0;
+    bool park_home_pending_ = false;
+    // Test seam: runs between the unlock and park_home_.start(). Set only
+    // while no Park or FindHome is in flight.
+    std::function<void()> park_home_before_start_;
     // The tail of a Park or FindHome that must first wait for motion to end
     // (#1430). Declared last with the re-send slot, for the same reason.
     util::OperationGeneration park_home_generation_;
@@ -2152,6 +2188,12 @@ std::unique_ptr<TelescopeDriver> create_onstep_telescope_auto(int device_number,
     return create_onstep_telescope_deferred(
         device_number, [mount_index] { return resolve_onstep_serial_auto(mount_index); }, site_latitude_deg,
         site_longitude_deg, site_elevation_m, sync_time_on_connect);
+}
+
+void set_park_home_before_start_for_testing(TelescopeDriver& driver, std::function<void()> hook) {
+    if (auto* onstep = dynamic_cast<OnStepTelescopeDriver*>(&driver)) {
+        onstep->set_park_home_before_start_for_testing(std::move(hook));
+    }
 }
 
 namespace detail {

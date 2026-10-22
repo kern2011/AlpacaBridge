@@ -259,7 +259,9 @@ it is never reachable through `router.cpp` or the web UI.
     `AtHome` (a home's), until the next motion command (`MoveAxis`, `AbortSlew`, a GOTO, `Unpark`,
     `Park`, `FindHome`) or a reconnect clears it; those also end a task still running, without
     sending anything (the shared rule "A failed async operation body keeps its error"). A
-    `PulseGuide` does not.
+    `PulseGuide` does not. The call claims the task under `mutex_` before it releases it
+    (`park_home_claim_`, decision 0006 rule 3), so a newer command that lands before the task starts
+    still ends it, and `Slewing` reads true from the call until the task ends.
   - **`:GE#` details:** OnStep 4.x has `:GE#` too, per channel, with the same codes up to 23
     (OnStep `Globals.h` `CommandErrors`; no 25), and its `:hC#` stops the mount when it refuses for
     motion. A reply that is not a two-digit code (firmware without `:GE#`, 1 s timeout) leaves the
