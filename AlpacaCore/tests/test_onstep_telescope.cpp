@@ -2207,13 +2207,14 @@ TEST_CASE("OnStep Telescope Driver - a Park body that starts late leaves a newer
         gate_cv.notify_all();
         gate_cv.wait_for(lock, std::chrono::seconds(5), [&] { return park_body_returned; });
     });
+    const auto waits_before = mount->clock.wait_count();
     REQUIRE_NOTHROW(driver->find_home());
     alpacacore::vendor::onstep::set_park_home_before_start_for_testing(*driver, nullptr);
     {
         std::lock_guard<std::mutex> lock(gate_mutex);
         REQUIRE(park_body_returned);
     }
-    settle(*mount, *driver);
+    settle(*mount, *driver, waits_before);
     CHECK(mount->count(":hC#") == 1);  // the FindHome still runs
     CHECK(mount->count(":hP#") == 0);
     driver->set_connected(false);
