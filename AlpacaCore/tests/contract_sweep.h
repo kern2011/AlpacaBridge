@@ -492,7 +492,7 @@ inline ContractEntry contract_entry_skywatcher_telescope() {
 
 #ifdef ALPACACORE_ENABLE_ONSTEP
 inline ContractEntry contract_entry_onstep_telescope() {
-    auto entry = with_command_passthrough(make_entry(
+    return with_command_passthrough(make_entry(
         "onstep_telescope", "onstep", "telescope", DeviceType::Telescope,
         [](int n) -> std::unique_ptr<AlpacaDriver> {
             vendor::onstep::ConnectionInfo conn;
@@ -502,8 +502,6 @@ inline ContractEntry contract_entry_onstep_telescope() {
             return vendor::onstep::create_onstep_telescope(n, conn);
         },
         kSrcAgentsAxis));
-    return with_rate_getters_answering(std::move(entry),
-                                       "OnStep rows of #1478 are left to the OnStep maintainer (open PR #1494)");
 }
 #endif
 

@@ -70,6 +70,8 @@ constexpr auto kInMotionRetryWindow = std::chrono::seconds(3);
 constexpr auto kInMotionRetryPoll = std::chrono::milliseconds(200);
 // OnStepX :GE# codes (docs/COMMAND_REFERENCE.md, "Command Error Codes").
 constexpr int kCeNone = 0;
+// The longest PulseGuide the :Mg[nsew]#### command can carry (#1478).
+constexpr int kMaxPulseGuideMs = 9999;
 constexpr int kCeSlewInMotion = 22;
 constexpr int kCeTrue = 25;
 
@@ -281,6 +283,13 @@ public:
     bool get_connected() const override {
         // A removed or re-enumerated adapter reads as not connected (#1241).
         return published_connected_.load() && OnStepProtocolWrapper::instance().link_alive();
+    }
+
+    // NotConnected exactly when Connected reads false, without mutex_.
+    void check_connected_lock_free() const {
+        if (!get_connected()) {
+            throw AlpacaException("Not connected to OnStep mount", AlpacaError::NotConnected);
+        }
     }
 
     // Why the serial link was lost, kept until the next Connect or Disconnect
@@ -619,7 +628,13 @@ public:
         return cached_dec_degrees_;
     }
 
-    double get_declination_rate() const override { return 0.0; }
+    // Rates are not supported (always 0), but an ASCOM read still throws
+    // NotConnected while disconnected (#1478). Read lock-free, as Connected
+    // is, so the getter never waits behind serial I/O under mutex_ (#1449).
+    double get_declination_rate() const override {
+        check_connected_lock_free();
+        return 0.0;
+    }
 
     void set_declination_rate(double rate) override {
         (void)rate;
@@ -679,7 +694,10 @@ public:
         return cached_ra_hours_;
     }
 
-    double get_right_ascension_rate() const override { return 0.0; }
+    double get_right_ascension_rate() const override {
+        check_connected_lock_free();  // see get_declination_rate()
+        return 0.0;
+    }
 
     void set_right_ascension_rate(double rate) override {
         (void)rate;
@@ -966,22 +984,20 @@ public:
         if (direction < 0 || direction > 3) {
             throw AlpacaException("Invalid PulseGuide direction", AlpacaError::InvalidValue);
         }
-        if (duration < 0) {
-            throw AlpacaException("PulseGuide duration must be >= 0", AlpacaError::InvalidValue);
+        // The wire command's duration field is 4 digits (:Mgn####), so a
+        // longer pulse cannot be sent: refuse it instead of pulsing for less
+        // than asked (#1478).
+        if (duration < 0 || duration > kMaxPulseGuideMs) {
+            throw AlpacaException("PulseGuide duration must be 0 to " + std::to_string(kMaxPulseGuideMs) + " ms",
+                                  AlpacaError::InvalidValue);
         }
         // Hardware pulse guide: the mount times the pulse internally
         // (:Mgn####/:Mgs####/:Mge####/:Mgw####), so unlike a software-timed
         // implementation there is no background stop thread to manage here —
         // is_pulse_guiding() just compares against the known end time.
-        // OnStepProtocolWrapper::pulse_guide() silently clamps duration_ms to
-        // [0, 9999] to fit the wire command's fixed 4-digit field; clamp the
-        // same way here so the cached end time matches what the mount
-        // actually pulses for, rather than IsPulseGuiding over-reporting for
-        // whatever a caller-supplied duration beyond 9999ms overshot by.
-        const int clamped_duration = std::clamp(duration, 0, 9999);
         OnStepProtocolWrapper::instance().pulse_guide(direction, duration);
         pulse_guiding_active_ = true;
-        pulse_guide_end_time_ = clock_.now() + std::chrono::milliseconds(clamped_duration);
+        pulse_guide_end_time_ = clock_.now() + std::chrono::milliseconds(duration);
         equatorial_cache_valid_ = false;
     }
 

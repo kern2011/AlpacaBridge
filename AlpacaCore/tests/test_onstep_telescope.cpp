@@ -1850,6 +1850,24 @@ TEST_CASE("OnStep Telescope Driver - Park during a home stops the home and parks
     driver->set_connected(false);
 }
 
+// #1478: the :Mg[nsew]#### field holds 4 digits, so a longer PulseGuide is
+// refused (InvalidValue) instead of being clamped to 9999 ms and reported as
+// done; 9999 ms itself still goes out.
+TEST_CASE("OnStep Telescope Driver - PulseGuide refuses a duration over 9999 ms", "[onstep][telescope][unit]") {
+    auto mount = std::make_shared<ParkHomeFake>();
+    alpacacore::test::FakeMountServer server([mount](const std::string& chunk) { return mount->reply(chunk); });
+    REQUIRE(server.ok());
+    auto driver = connect_park_home_fake(server, *mount);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+
+    require_alpaca_error([&] { driver->pulse_guide(0, 10000); }, alpacacore::AlpacaError::InvalidValue);
+    CHECK(mount->count(":Mg") == 0);
+    CHECK_FALSE(driver->get_is_pulse_guiding());
+    REQUIRE_NOTHROW(driver->pulse_guide(0, 9999));
+    CHECK(mount->count(":Mgn9999#") == 1);
+    driver->set_connected(false);
+}
+
 TEST_CASE("OnStep Telescope Driver - Park during a pulse guide stops it and parks", "[onstep][telescope][unit]") {
     auto mount = std::make_shared<ParkHomeFake>();
     alpacacore::test::FakeMountServer server([mount](const std::string& chunk) { return mount->reply(chunk); });

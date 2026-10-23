@@ -1,0 +1,3 @@
+### Fixed
+
+- **OnStep: the rate getters throw `NotConnected` while disconnected, and PulseGuide refuses a duration it cannot send** (issue #1478): `RightAscensionRate` and `DeclinationRate` read 0 even with no mount connected; they now throw `NotConnected`, as every other telescope driver does, and the contract sweep's OnStep exemption is gone. A `PulseGuide` longer than 9999 ms (the most OnStep's 4-digit `:Mg` command holds) was clamped to 9999 ms and reported as done; it is now refused with `InvalidValue`. Tests: `test_onstep_telescope.cpp` "OnStep Telescope Driver - PulseGuide refuses a duration over 9999 ms"; `test_contract_sweep.cpp` the OnStep telescope's disconnected rate-getter case.
