@@ -1075,8 +1075,6 @@ TEST_CASE("OnStep link loss - a fault standing past the staleness bound loses th
     driver->set_connected(false);
 }
 
-// #1414: a client that only writes after the fault latched still sees the
-// link lost once the fault has stood past the bound, as a read would.
 // #1414: a latched fault during a MoveAxis is reported by Slewing too, as by
 // every read (decision 0009 rule 1); one failed read alone still keeps
 // reporting the move.
@@ -1156,6 +1154,8 @@ TEST_CASE("OnStep link loss - a faulted AbortSlew does not restore tracking late
     driver->set_connected(false);
 }
 
+// #1414: a client that only writes after the fault latched still sees the
+// link lost once the fault has stood past the bound, as a read would.
 TEST_CASE("OnStep link loss - a write refused past the staleness bound loses the link", "[onstep][serial][connected]") {
     WrapperReset reset;
     alpacacore::test::FakeTaskClock clock;
