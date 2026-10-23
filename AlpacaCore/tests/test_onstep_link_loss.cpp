@@ -1146,3 +1146,29 @@ TEST_CASE("OnStep link loss - FindHome fails when the mount goes silent after :h
     }
     driver->set_connected(false);
 }
+
+// #1414: the same for Park. A :hP# answered 0 is followed by :GE#; a mount
+// that goes silent there would leave no code and the park counted as
+// retried in the background, so Park returned success to a silent mount.
+TEST_CASE("OnStep link loss - Park fails when the mount goes silent after its :hP# reply",
+          "[onstep][serial][connected]") {
+    WrapperReset reset;
+    FakeOnStepSerialMount mount;
+    mount.set_reply(":GU#", "nNpEo190#");  // not parked
+    mount.set_reply(":hP#", "0");
+    mount.mute_on(":GE#");
+    PortLink link(mount.slave_path());
+    auto driver = alpacacore::vendor::onstep::create_onstep_telescope(0, quick_serial_info(link));
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    try {
+        driver->park();
+        FAIL("Park reported success to a mount that stopped answering");
+    } catch (const alpacacore::AlpacaException& ex) {
+        CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
+        CHECK(std::string(ex.what()).find("did not answer") != std::string::npos);
+    }
+    CHECK(driver->get_connected());  // one failed read: not yet a fault
+    driver->set_connected(false);
+}
