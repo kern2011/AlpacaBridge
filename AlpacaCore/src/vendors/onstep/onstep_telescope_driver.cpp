@@ -1717,7 +1717,10 @@ private:
         // A body stopped before it runs takes no request: a newer Park or
         // FindHome may have stored its own after cancelling this body and
         // before its start() marked this one superseded, and this body must
-        // not end that request (#1430).
+        // not end that request (#1430). Leaving it is safe because every way
+        // this slot is cancelled also clears or replaces the request
+        // (supersede_park_or_home_locked(), a newer start): keep it so, or a
+        // request no body runs leaves Slewing true.
         if (!park_home_request_ || ctx.stop_reason() != util::StopReason::None) {
             return;  // superseded or cancelled, or carried out by an earlier body
         }
