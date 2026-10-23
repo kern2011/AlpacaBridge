@@ -1048,6 +1048,7 @@ TEST_CASE("OnStep link loss - a fault standing past the staleness bound loses th
     clock.advance(alpacacore::util::kLinkStalenessBound - std::chrono::seconds(1));
     try {
         (void)driver->get_right_ascension();
+        FAIL("a read while faulted returned a value");
     } catch (const alpacacore::AlpacaException& ex) {
         CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);  // still faulted, not lost
     }
