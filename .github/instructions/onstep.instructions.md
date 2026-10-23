@@ -51,7 +51,8 @@ it is never reachable through `router.cpp` or the web UI.
   `get_side_of_pier()` (a `:GRa#`/`:GDe#` pair, ~25 ms each on the HM-17 at 9600 baud, so ~50 ms,
   uses about half of a FAST read's 0.1s budget; it was ~0.16s each while `read_response()` slept
   10 ms after every reply character, #1242) — hour-angle *sign* tolerates a couple of seconds of
-  RA staleness, so reuse whatever is already cached and only force a fetch if never yet populated.
+  RA staleness, so reuse whatever is already cached and only force a fetch if never yet populated,
+  or while the link fault is latched (no cache is served then, #1414).
 - **`:GU#` status-character table**, confirmed against real hardware traces (`nNpHrsEo180` etc.
   observed live): `n`/`N` = **NOT** tracking / **NOT** slewing respectively (`== npos` check, i.e.
   the character's *absence* means the state is active — this is the opposite polarity of what

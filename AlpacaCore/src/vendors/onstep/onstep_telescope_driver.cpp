@@ -715,7 +715,8 @@ public:
         // window is a few arcseconds, utterly negligible next to the ±6h
         // scale this decision operates on — so reuse whatever is already
         // cached and only force a live fetch if a position has never been
-        // read at all (e.g. immediately after connect).
+        // read at all (e.g. immediately after connect), or while the link
+        // fault is latched (no cache is served then, #1414).
         ensure_site_info_cached_locked();
         if (!equatorial_cache_valid_ || link_health_.faulted()) {
             refresh_equatorial_cache_locked();  // faulted: never the cache (decision 0009 rule 1, #1414)
