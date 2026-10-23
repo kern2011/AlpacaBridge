@@ -1077,6 +1077,85 @@ TEST_CASE("OnStep link loss - a fault standing past the staleness bound loses th
 
 // #1414: a client that only writes after the fault latched still sees the
 // link lost once the fault has stood past the bound, as a read would.
+// #1414: a latched fault during a MoveAxis is reported by Slewing too, as by
+// every read (decision 0009 rule 1); one failed read alone still keeps
+// reporting the move.
+TEST_CASE("OnStep link loss - Slewing reports a latched fault during a MoveAxis", "[onstep][serial][connected]") {
+    WrapperReset reset;
+    alpacacore::test::FakeTaskClock clock;
+    FakeOnStepSerialMount mount;
+    PortLink link(mount.slave_path());
+    auto driver = alpacacore::vendor::onstep::create_onstep_telescope(0, quick_serial_info(link), clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    REQUIRE_NOTHROW(driver->move_axis(0, 1.0));
+
+    mount.mute(true);
+    clock.advance(std::chrono::milliseconds(2100));  // past the 2 s caches
+    CHECK(driver->get_slewing());                    // one failed read: still the move
+    for (int i = 0; i < 2; ++i) {
+        try {
+            (void)driver->get_right_ascension();
+        } catch (const alpacacore::AlpacaException&) {  // NOLINT(bugprone-empty-catch)
+            // the third failed read latches the fault
+        }
+    }
+    try {
+        (void)driver->get_slewing();
+        FAIL("Slewing hid a latched fault");
+    } catch (const alpacacore::AlpacaException& ex) {
+        CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
+    }
+    mount.mute(false);
+    driver->set_connected(false);
+}
+
+// #1414 / #1230: an AbortSlew refused for a latched fault still gives up the
+// tracking restore of the GOTO it aborted, so a mount that answers again
+// idle is not sent the tracking start (:ST60.164275#) at the next slew end
+// the driver sees.
+TEST_CASE("OnStep link loss - a faulted AbortSlew does not restore tracking later", "[onstep][serial][connected]") {
+    WrapperReset reset;
+    alpacacore::test::FakeTaskClock clock;
+    FakeOnStepSerialMount mount;
+    mount.set_reply(":GU#", "pEo190#");  // tracking, GOTO running
+    PortLink link(mount.slave_path());
+    auto driver = alpacacore::vendor::onstep::create_onstep_telescope(0, quick_serial_info(link), clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    REQUIRE_NOTHROW(driver->slew_to_coordinates_async(2.0, 20.0));
+
+    mount.mute(true);
+    clock.advance(std::chrono::milliseconds(2100));
+    for (int i = 0; i < 3; ++i) {
+        try {
+            (void)driver->get_right_ascension();
+        } catch (const alpacacore::AlpacaException&) {  // NOLINT(bugprone-empty-catch)
+            // the third throws: the fault latched
+        }
+    }
+    try {
+        driver->abort_slew();
+        FAIL("AbortSlew reported success to a silent mount");
+    } catch (const alpacacore::AlpacaException& ex) {
+        CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
+    }
+
+    const auto tracking_starts = [&mount] {
+        const auto all = mount.commands();
+        return std::count_if(all.begin(), all.end(), [](const std::string& c) { return c.rfind(":ST6", 0) == 0; });
+    };
+    const auto starts_before = tracking_starts();
+    mount.set_reply(":GU#", "nNpEo190#");  // back, idle, not tracking
+    mount.mute(false);
+    clock.advance(std::chrono::milliseconds(2100));
+    for (int i = 0; i < 3; ++i) {
+        (void)driver->get_slewing();
+    }
+    CHECK(tracking_starts() == starts_before);
+    driver->set_connected(false);
+}
+
 TEST_CASE("OnStep link loss - a write refused past the staleness bound loses the link", "[onstep][serial][connected]") {
     WrapperReset reset;
     alpacacore::test::FakeTaskClock clock;

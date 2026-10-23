@@ -237,7 +237,9 @@ it is never reachable through `router.cpp` or the web UI.
   raw `command_blind`/`command_bool` pass-through): the commands are blind, so on a
   healthy fd they cannot fail and would otherwise report success to a mount that is not
   listening. `AbortSlew` and `MoveAxis(axis, 0)` send their stops first and then throw, so the stop
-  is still tried and the client learns it may not have arrived; a new `MoveAxis` move is refused
+  is still tried and the client learns it may not have arrived (`AbortSlew` makes its #1230
+  tracking decision before it throws, so a faulted abort gives up the restore); `Slewing` during a
+  `MoveAxis` rethrows the fault like any read; a new `MoveAxis` move is refused
   before it ends a waiting `Park` or `FindHome`. A refused write checks the staleness bound too,
   so a client that only writes still sees the link lost. A fault that has
   stood for `util::kLinkStalenessBound` (30 s, on the driver's task clock; tests advance a

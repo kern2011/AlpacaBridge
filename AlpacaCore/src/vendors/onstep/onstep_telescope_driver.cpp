@@ -1277,8 +1277,6 @@ public:
         slew_force_until_ = std::chrono::steady_clock::time_point::min();
         clear_manual_motion_locked();
         status_cache_valid_ = false;
-        // The stops went out, but a silent mount may not have heard them (#1414).
-        refuse_while_faulted_locked("AbortSlew");
         // ASCOM: after AbortSlew, tracking returns to its state before the
         // slew. Decide now instead of at a later slew end the driver may never
         // see (#1230). Only an aborted GOTO costs the extra :GU#.
@@ -1290,6 +1288,10 @@ public:
                 tracking_before_slew_ = false;  // status unknown: never restart blind
             }
         }
+        // The stops went out, but a silent mount may not have heard them
+        // (#1414). Checked after the tracking decision, so a faulted abort
+        // still gives up the restore instead of leaving it for a later slew end.
+        refuse_while_faulted_locked("AbortSlew");
     }
 
     // An Alt/Az slew is not equatorial, so it skips the Tracking check
@@ -1931,6 +1933,11 @@ private:
             // Slewing follows the mount once it has shown the move (#1378).
             try {
                 refresh_status_cache_locked(false);
+            } catch (const AlpacaException& ex) {
+                if (link_health_.faulted() || ex.error_code() == AlpacaError::NotConnected) {
+                    throw;  // a latched fault or a lost link is reported, as by every read (#1414)
+                }
+                return true;  // keep reporting the move; one read error is not a stop
             } catch (...) {
                 return true;  // keep reporting the move; the read error is not a stop
             }
