@@ -36,7 +36,8 @@ it is never reachable through `router.cpp` or the web UI.
   the mount stops the pulse itself. `IsPulseGuiding` is tracked from the known requested
   duration, not polled from the mount. Unlike SynScan (no native pulse guide), this driver does
   **not** need a background stop-thread. A `Duration` over 9999 ms does not fit the 4-digit field
-  and is refused with `InvalidValue` rather than clamped (#1478).
+  and is refused with `InvalidValue` rather than clamped (#1478). Direction and Duration are
+  checked before the connected and parked checks, as are `DestinationSideOfPier`'s RA and Dec.
 - **SideOfPier must be computed from hour angle, not read from `:GU#`'s pier-side letter** — the same
   lesson iOptron already learned from its `:GEP#` raw pier value (see the [iOptron notes](ioptron.instructions.md)):
   a mount's raw physical-pier-side report does not match the ASCOM convention once tracking past
@@ -384,6 +385,11 @@ it is never reachable through `router.cpp` or the web UI.
   during this implementation, so the setters throw `PropertyNotImplemented` rather than
   advertise support that might silently no-op. The getters read 0, and throw `NotConnected` while
   disconnected (read lock-free from `Connected`, #1478).
+- **`UTCDate` is the mount's clock or a client's write, never the host's** (#1478): a `:GL#`/`:GC#`
+  read that fails throws `InvalidOperation`, and is not retried for 2 s. The LST computations
+  still fall back to the host clock, without storing it. `SiteElevation` throws
+  `InvalidOperation` until the device config or a client sets it: the protocol has no elevation
+  command, so it is client-side only.
 - **`DoesRefraction` comes from the firmware, not a local flag** (#1216): OnStepX applies
   refraction to every RA/Dec it reports unless it was built for observed-place coordinates, and
   `:GXEE#` says which: it replies `MOUNT_COORDS - 1` as one bare digit with no `#` (`0` observed
