@@ -298,7 +298,9 @@ it is never reachable through `router.cpp` or the web UI.
     sending anything (the shared rule "A failed async operation body keeps its error"). A
     `PulseGuide` does not. The call claims the task under `mutex_` before it releases it
     (`park_home_claim_`, decision 0006 rule 3), so a newer command that lands before the task starts
-    still ends it, and `Slewing` reads true from the call until the task ends.
+    still ends it, and `Slewing` reads true from the call until the task ends. The task runs the
+    request current when it starts, and a task already stopped when it starts takes none, so a
+    newer Park or FindHome is never cleared by an older task that started late.
   - **`:GE#` details:** OnStep 4.x has `:GE#` too, per channel, with the same codes up to 23
     (OnStep `Globals.h` `CommandErrors`; no 25), and its `:hC#` stops the mount when it refuses for
     motion. A reply that is not a two-digit code (firmware without `:GE#`, 1 s timeout) leaves the

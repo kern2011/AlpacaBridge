@@ -1329,6 +1329,10 @@ public:
         move_axis_resend_.set_spawn_for_testing(std::move(spawn));
     }
 
+    void set_park_home_spawn_for_testing(std::function<std::thread(std::function<void()>)> spawn) {
+        park_home_.set_spawn_for_testing(std::move(spawn));
+    }
+
 private:
     void check_connected() const {
         if (!connected_) {
@@ -1705,8 +1709,12 @@ private:
     // retry. Waits on the task clock with mutex_ released (decision 0005).
     void run_park_or_home(util::OperationContext& ctx) {
         std::unique_lock<std::mutex> lock(mutex_);
-        if (!park_home_request_) {
-            return;  // superseded, or carried out by an earlier body
+        // A body stopped before it runs takes no request: a newer Park or
+        // FindHome may have stored its own after cancelling this body and
+        // before its start() marked this one superseded, and this body must
+        // not end that request (#1430).
+        if (!park_home_request_ || ctx.stop_reason() != util::StopReason::None) {
+            return;  // superseded or cancelled, or carried out by an earlier body
         }
         const ParkHomeRequest request = *park_home_request_;
         run_park_or_home_locked(lock, ctx, request.who, request.home, request.stopped, request.code, request.claim);
@@ -2416,6 +2424,12 @@ void set_move_axis_resend_spawn_for_testing(TelescopeDriver& driver,
                                             std::function<std::thread(std::function<void()>)> spawn) {
     if (auto* onstep = dynamic_cast<OnStepTelescopeDriver*>(&driver)) {
         onstep->set_move_axis_resend_spawn_for_testing(std::move(spawn));
+    }
+}
+
+void set_park_home_spawn_for_testing(TelescopeDriver& driver, std::function<std::thread(std::function<void()>)> spawn) {
+    if (auto* onstep = dynamic_cast<OnStepTelescopeDriver*>(&driver)) {
+        onstep->set_park_home_spawn_for_testing(std::move(spawn));
     }
 }
 
