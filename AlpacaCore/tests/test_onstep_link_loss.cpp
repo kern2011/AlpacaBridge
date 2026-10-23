@@ -106,6 +106,12 @@ public:
         sever_on_ = command;
     }
 
+    /// As sever_on(), but for the command that follows `command`.
+    void sever_after(const std::string& command) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        sever_after_ = command;
+    }
+
     std::vector<std::string> commands() const {
         std::lock_guard<std::mutex> lock(mutex_);
         return commands_;
@@ -170,7 +176,8 @@ private:
                 {
                     std::lock_guard<std::mutex> lock(mutex_);
                     commands_.push_back(cmd);
-                    cut = !sever_on_.empty() && cmd == sever_on_;
+                    cut = (!sever_on_.empty() && cmd == sever_on_) || sever_next_;
+                    sever_next_ = !sever_after_.empty() && cmd == sever_after_;
                     if (!mute_on_.empty() && cmd == mute_on_) {
                         muted_.store(true);
                     }
@@ -207,6 +214,8 @@ private:
     std::map<std::string, std::string> replies_;  // under mutex_
     std::vector<std::string> commands_;
     std::string sever_on_;
+    std::string sever_after_;  // under mutex_
+    bool sever_next_ = false;  // under mutex_
     std::thread worker_;
 };
 
@@ -1122,6 +1131,13 @@ TEST_CASE("OnStep link loss - FindHome fails when the mount goes silent after :h
         }
         CHECK(mount.received(":GE#"));
         CHECK(driver->get_connected());  // one failed read: not yet a fault
+    }
+    SECTION("a link lost at the :GU# read fails NotConnected") {
+        mount.set_reply(":hC#", "");
+        mount.set_reply(":GE#", "");  // no code, so the :GU# read follows
+        mount.sever_after(":GE#");    // the adapter goes as that :GU# is sent
+        require_not_connected_error([&] { driver->find_home(); });
+        CHECK_FALSE(driver->get_connected());
     }
     SECTION("firmware without :GE# still homes") {
         mount.set_reply(":hC#", "");

@@ -1681,6 +1681,10 @@ private:
             note_read_ok_locked();
         } catch (const std::exception& ex) {
             note_read_failure_locked(ex);  // throws once the fault latched or the link went
+            if (const auto* alpaca = dynamic_cast<const AlpacaException*>(&ex);
+                alpaca != nullptr && alpaca->error_code() == AlpacaError::NotConnected) {
+                throw;  // the link is gone: NotConnected, as for any other call
+            }
             throw AlpacaException(std::string(who) + ": the mount did not answer after the command (" + ex.what() + ")",
                                   AlpacaError::DriverException);
         }

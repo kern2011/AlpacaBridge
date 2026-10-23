@@ -2172,7 +2172,8 @@ TEST_CASE("OnStep Telescope Driver - a Park body that starts late leaves a newer
             return std::thread([&, body = std::move(body)] {  // the Park's body: held until released
                 {
                     std::unique_lock<std::mutex> lock(gate_mutex);
-                    gate_cv.wait(lock, [&] { return released; });
+                    // Bounded, so a case that fails before the release ends.
+                    gate_cv.wait_for(lock, std::chrono::seconds(10), [&] { return released; });
                 }
                 body();
                 {
