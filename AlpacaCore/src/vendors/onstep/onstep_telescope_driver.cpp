@@ -368,7 +368,7 @@ public:
             altaz_cache_valid_ = false;
             site_info_valid_ = false;
             utc_offset_.clear();
-            last_clock_read_failure_.reset();
+            mount_clock_unreadable_.reset();
             client_disagreement_warned_ = false;
             firmware_reports_guide_move_ = false;
             link_health_.reset();
@@ -456,6 +456,11 @@ public:
                     set_utc_date_locked(std::chrono::system_clock::now());
                 } catch (...) {  // NOLINT(bugprone-empty-catch)
                 }
+            }
+            // The mount clock is read here, once, so UTCDate (and so DeviceState)
+            // never waits on a serial exchange (#1478); a written UTCDate needs none.
+            if (!utc_offset_.valid()) {
+                seed_utc_from_mount_locked();
             }
             try {
                 // Continuous-motion (:Mn#/:Ms#/:Me#/:Mw#) commands run at
@@ -929,35 +934,35 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
         if (!utc_offset_.valid()) {
-            // The host clock is not the mount's: a mount clock that cannot be
-            // read throws InvalidOperation (ITelescopeV4 UTCDate, #1478), and
-            // the read is not retried for kSiteInfoRetryDelay, so a silent
-            // mount does not cost a timeout on every UTCDate.
-            const auto now = clock_.now();
-            if (last_clock_read_failure_ && (now - *last_clock_read_failure_) < kSiteInfoRetryDelay) {
-                throw AlpacaException("The mount clock could not be read", AlpacaError::InvalidOperation);
-            }
-            std::chrono::system_clock::time_point seeded;
-            try {
-                TimeInfo info = OnStepProtocolWrapper::instance().get_time();
-                using namespace std::chrono;
-                int year = 2000 + info.year;
-                sys_days date =
-                    sys_days{std::chrono::year{year} / std::chrono::month{static_cast<unsigned>(info.month)} /
-                             std::chrono::day{static_cast<unsigned>(info.day)}};
-                auto local_time = date + hours{info.hour} + minutes{info.minute} + seconds{info.second};
-                auto offset = duration_cast<system_clock::duration>(
-                    std::chrono::duration<double, std::ratio<3600>>(info.utc_offset_hours));
-                seeded = local_time - offset;
-            } catch (const std::exception& ex) {
-                last_clock_read_failure_ = now;
-                throw AlpacaException(std::string("The mount clock could not be read: ") + ex.what(),
-                                      AlpacaError::InvalidOperation);
-            }
-            last_clock_read_failure_.reset();
-            utc_offset_.set(seeded, clock_.now());
+            // The host clock is not the mount's (ITelescopeV4 UTCDate, #1478). The
+            // mount clock is read once at connect, so a getter never waits on it.
+            throw AlpacaException("The mount clock could not be read at connect" +
+                                      (mount_clock_unreadable_ ? ": " + *mount_clock_unreadable_ : std::string()) +
+                                      "; write UTCDate to set it",
+                                  AlpacaError::InvalidOperation);
         }
         return current_utc_time_locked();
+    }
+
+    // At connect (#1478): seeds utc_offset_ from :GL#/:GC#/:GG#, or keeps why it
+    // could not, for UTCDate to report until a UTCDate write or the next connect.
+    void seed_utc_from_mount_locked() {
+        try {
+            TimeInfo info = OnStepProtocolWrapper::instance().get_time();
+            using namespace std::chrono;
+            int year = 2000 + info.year;
+            sys_days date = sys_days{std::chrono::year{year} / std::chrono::month{static_cast<unsigned>(info.month)} /
+                                     std::chrono::day{static_cast<unsigned>(info.day)}};
+            auto local_time = date + hours{info.hour} + minutes{info.minute} + seconds{info.second};
+            auto offset = duration_cast<system_clock::duration>(
+                std::chrono::duration<double, std::ratio<3600>>(info.utc_offset_hours));
+            utc_offset_.set(local_time - offset, clock_.now());
+            mount_clock_unreadable_.reset();
+        } catch (const std::exception& ex) {
+            mount_clock_unreadable_ = ex.what();
+        } catch (...) {
+            mount_clock_unreadable_ = "unknown error";
+        }
     }
 
     void set_utc_date(std::chrono::system_clock::time_point utc) override {
@@ -1868,7 +1873,7 @@ private:
         slew_force_until_ = std::chrono::steady_clock::time_point::min();
         pulse_guiding_active_ = false;
         utc_offset_.clear();  // decision 0014: the written UTCDate lives until the next connect or disconnect
-        last_clock_read_failure_.reset();
+        mount_clock_unreadable_.reset();
     }
 
     // open-astro#521: OnStepX keeps running a GOTO while the serial link is
@@ -2269,6 +2274,7 @@ private:
         const auto client_minus_host = utc - std::chrono::system_clock::now();  // before the write (#409)
         OnStepProtocolWrapper::instance().set_time(info);
         utc_offset_.set(utc, clock_.now());
+        mount_clock_unreadable_.reset();
         // The mount now runs on the client's clock and so does the LST above;
         // on a disciplined host say so once (open-astro#409).
         alpacacore::util::ClientUtcWarning::warn_once("OnStep", client_minus_host, client_disagreement_warned_);
@@ -2344,7 +2350,7 @@ private:
     mutable util::UtcOffset utc_offset_;
     // When a UTCDate read last failed to read the mount clock; under mutex_,
     // cleared with utc_offset_.
-    mutable std::optional<std::chrono::steady_clock::time_point> last_clock_read_failure_;
+    std::optional<std::string> mount_clock_unreadable_;  // why the connect could not read the mount clock (#1478)
 
     mutable bool slewing_cached_ = false;
     mutable std::chrono::steady_clock::time_point slew_force_until_;

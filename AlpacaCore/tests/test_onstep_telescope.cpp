@@ -379,6 +379,15 @@ TEST_CASE("OnStep Telescope Driver - UTCDate throws InvalidOperation when the mo
         if (chunk.rfind(":GG", 0) == 0) {
             return std::string("+00#");
         }
+        if (chunk.rfind(":Gt", 0) == 0) {
+            return std::string("+40*30#");
+        }
+        if (chunk.rfind(":Gg", 0) == 0) {
+            return std::string("+085*30#");
+        }
+        if (chunk.rfind(":S", 0) == 0) {
+            return std::string("1");  // bare-digit set acks (:SL/:SC/:SG)
+        }
         return std::string("0#");
     });
     REQUIRE(server.ok());
@@ -388,24 +397,42 @@ TEST_CASE("OnStep Telescope Driver - UTCDate throws InvalidOperation when the mo
     conn.tcp_port = server.port();
     conn.response_timeout_ms = 50;
     auto driver = alpacacore::vendor::onstep::create_onstep_telescope(0, conn, clock);
-    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
-
-    require_alpaca_error([&] { (void)driver->get_utc_date(); }, alpacacore::AlpacaError::InvalidOperation);
-    CHECK(clock_reads == 1);
-    try {
-        (void)driver->get_sidereal_time();  // computes LST from the host clock
-    } catch (const std::exception&) {       // NOLINT(bugprone-empty-catch)
-    }
-    clock_answers = true;
-    require_alpaca_error([&] { (void)driver->get_utc_date(); }, alpacacore::AlpacaError::InvalidOperation);
-    CHECK(clock_reads == 1);  // within the retry delay: no read
-
-    clock.advance(std::chrono::seconds(2));
-    (void)clock.wait_for_woken_settled(std::chrono::seconds(2));
     using namespace std::chrono;
     const auto mount_utc = sys_days{year{2026} / October / 23} + hours{10} + minutes{20} + seconds{30};
-    CHECK(driver->get_utc_date() == mount_utc);
-    CHECK(clock_reads == 2);
+
+    SECTION("a clock the connect could not read: UTCDate throws, and no read is tried again") {
+        REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+        CHECK(clock_reads == 1);  // the connect's read
+        require_alpaca_error([&] { (void)driver->get_utc_date(); }, alpacacore::AlpacaError::InvalidOperation);
+        REQUIRE_NOTHROW((void)driver->get_sidereal_time());  // computes LST from the host clock
+        clock_answers = true;
+        clock.advance(std::chrono::seconds(60));
+        (void)clock.wait_for_woken_settled(std::chrono::seconds(2));
+        require_alpaca_error([&] { (void)driver->get_utc_date(); }, alpacacore::AlpacaError::InvalidOperation);
+        (void)driver->get_device_state();
+        (void)driver->get_device_state();
+        CHECK(clock_reads == 1);  // UTCDate and DeviceState never read the clock (#1478)
+
+        const auto written = sys_days{year{2026} / October / 24} + hours{1};
+        REQUIRE_NOTHROW(driver->set_utc_date(written));
+        CHECK(driver->get_utc_date() >= written);  // a UTCDate write sets it
+
+        driver->set_connected(false);
+        REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+        CHECK(clock_reads == 2);  // the next connect reads it again
+        CHECK(driver->get_utc_date() == mount_utc);
+    }
+
+    SECTION("a clock the connect read: DeviceState makes no clock reads") {
+        clock_answers = true;
+        REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+        CHECK(clock_reads == 1);
+        (void)driver->get_device_state();
+        (void)driver->get_device_state();
+        CHECK(driver->get_utc_date() == mount_utc);
+        CHECK(clock_reads == 1);
+    }
+
     driver->set_connected(false);
 }
 

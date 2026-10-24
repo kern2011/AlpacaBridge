@@ -123,8 +123,7 @@ it is never reachable through `router.cpp` or the web UI.
     the re-send slot waits through it, and the other deadlines read it too: the 2 s status and
     position cache ages, the slew grace, the pulse-guide end, the synchronous-slew poll and settle
     sleeps, the elapsed time since a UTCDate write (a `util::UtcOffset`, decision 0014, cleared on
-    connect and on disconnect), the 2 s wait before a failed mount-clock read for `UTCDate` is
-    tried again (`kSiteInfoRetryDelay`, #1478), and the #521 relink outage:
+    connect and on disconnect), and the #521 relink outage:
     the driver hands its clock to the process-wide wrapper at connect
     (`OnStepProtocolWrapper::set_task_clock()`, put back to the default by `release_task_clock()`
     when the driver goes), so the wrapper's loss and last-alive stamps and the outage share one
@@ -387,9 +386,12 @@ it is never reachable through `router.cpp` or the web UI.
   during this implementation, so the setters throw `PropertyNotImplemented` rather than
   advertise support that might silently no-op. The getters read 0, and throw `NotConnected` while
   disconnected (read lock-free from `Connected`, #1478).
-- **`UTCDate` is the mount's clock or a client's write, never the host's** (#1478): a `:GL#`/`:GC#`
-  read that fails throws `InvalidOperation`, and is not retried for 2 s. The LST computations
-  still fall back to the host clock, without storing it. `SiteElevation` throws
+- **`UTCDate` is the mount's clock or a client's write, never the host's** (#1478): the connect
+  reads the mount clock once (`:GL#`/`:GC#`/`:GG#`, `seed_utc_from_mount_locked()`, after any
+  `syncTimeOnConnect` write, which makes the read unneeded), so `UTCDate`, and so `DeviceState`,
+  never waits on a serial exchange. If that read fails, `UTCDate` throws `InvalidOperation` with
+  the reason, with no further read, until a `UTCDate` write or the next connect. The LST
+  computations still fall back to the host clock, without storing it. `SiteElevation` throws
   `InvalidOperation` until the device config or a client sets it: the protocol has no elevation
   command, so it is client-side only.
 - **`DoesRefraction` comes from the firmware, not a local flag** (#1216): OnStepX applies
