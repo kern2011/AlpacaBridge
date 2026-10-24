@@ -123,7 +123,8 @@ it is never reachable through `router.cpp` or the web UI.
     the re-send slot waits through it, and the other deadlines read it too: the 2 s status and
     position cache ages, the slew grace, the pulse-guide end, the synchronous-slew poll and settle
     sleeps, the elapsed time since a UTCDate write (a `util::UtcOffset`, decision 0014, cleared on
-    connect and on disconnect), and the #521 relink outage:
+    connect and on disconnect), the 2 s wait before a failed mount-clock read for `UTCDate` is
+    tried again (`kSiteInfoRetryDelay`, #1478), and the #521 relink outage:
     the driver hands its clock to the process-wide wrapper at connect
     (`OnStepProtocolWrapper::set_task_clock()`, put back to the default by `release_task_clock()`
     when the driver goes), so the wrapper's loss and last-alive stamps and the outage share one
