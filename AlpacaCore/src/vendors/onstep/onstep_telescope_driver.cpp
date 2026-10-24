@@ -1003,7 +1003,7 @@ public:
     }
 
     void pulse_guide(int direction, int duration) override {
-        // Arguments before the connected and parked checks (#1478).
+        // Arguments before the connected, fault and parked checks (#1478).
         if (direction < 0 || direction > 3) {
             throw AlpacaException("Invalid PulseGuide direction", AlpacaError::InvalidValue);
         }
@@ -1075,11 +1075,13 @@ public:
     }
 
     void sync_to_coordinates(double ra, double dec) override {
+        // Arguments before the connected, fault and parked checks, as the
+        // slews do (#1478).
+        validate_ra_dec(ra, dec, "SyncToCoordinates");
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
         refuse_while_faulted_locked("SyncToCoordinates");
         check_not_parked_locked("SyncToCoordinates");
-        validate_ra_dec(ra, dec, "SyncToCoordinates");
         auto& protocol = OnStepProtocolWrapper::instance();
         // Use the mount's own sync command — do NOT maintain a driver-level
         // offset, which would cause coordinate divergence during subsequent

@@ -446,6 +446,10 @@ TEST_CASE("OnStep Telescope Driver - DestinationSideOfPier and PulseGuide check 
     require_alpaca_error([&] { driver->pulse_guide(0, -1); }, alpacacore::AlpacaError::InvalidValue);
     require_alpaca_error([&] { driver->pulse_guide(0, 10000); }, alpacacore::AlpacaError::InvalidValue);
     require_alpaca_error([&] { driver->pulse_guide(3, 9999); }, alpacacore::AlpacaError::NotConnected);
+
+    require_alpaca_error([&] { driver->sync_to_coordinates(24.0, 0.0); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&] { driver->sync_to_coordinates(12.0, 90.1); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&] { driver->sync_to_coordinates(12.0, 10.0); }, alpacacore::AlpacaError::NotConnected);
 }
 
 TEST_CASE("OnStep Telescope Driver - a slow mount ack does not turn an accurate client clock into a warning",

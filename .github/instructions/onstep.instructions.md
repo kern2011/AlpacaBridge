@@ -37,7 +37,8 @@ it is never reachable through `router.cpp` or the web UI.
   duration, not polled from the mount. Unlike SynScan (no native pulse guide), this driver does
   **not** need a background stop-thread. A `Duration` over 9999 ms does not fit the 4-digit field
   and is refused with `InvalidValue` rather than clamped (#1478). Direction and Duration are
-  checked before the connected and parked checks, as are `DestinationSideOfPier`'s RA and Dec.
+  checked before the connected, link-fault and parked checks, as are `SyncToCoordinates`' and
+  `DestinationSideOfPier`'s RA and Dec.
 - **SideOfPier must be computed from hour angle, not read from `:GU#`'s pier-side letter** — the same
   lesson iOptron already learned from its `:GEP#` raw pier value (see the [iOptron notes](ioptron.instructions.md)):
   a mount's raw physical-pier-side report does not match the ASCOM convention once tracking past
