@@ -2348,9 +2348,9 @@ private:
     // Decision 0014: the UTCDate a client wrote (or the seed) and the task-clock
     // time since. Cleared on connect and disconnect. Under mutex_.
     mutable util::UtcOffset utc_offset_;
-    // When a UTCDate read last failed to read the mount clock; under mutex_,
-    // cleared with utc_offset_.
-    std::optional<std::string> mount_clock_unreadable_;  // why the connect could not read the mount clock (#1478)
+    // Why the connect could not read the mount clock (#1478); under mutex_,
+    // cleared on connect, disconnect and a UTCDate write.
+    std::optional<std::string> mount_clock_unreadable_;
 
     mutable bool slewing_cached_ = false;
     mutable std::chrono::steady_clock::time_point slew_force_until_;

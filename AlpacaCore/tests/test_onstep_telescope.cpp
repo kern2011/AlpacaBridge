@@ -360,9 +360,10 @@ TEST_CASE(
     driver->set_connected(false);
 }
 
-// #1478: the host clock never stands in for the mount's. A mount clock that
-// cannot be read throws InvalidOperation, the read is not retried for 2 s,
-// and an LST computation in between does not store the host clock either.
+// #1478: the host clock never stands in for the mount's. The connect reads the
+// mount clock once; when that fails UTCDate throws InvalidOperation and reads
+// nothing until a UTCDate write or the next connect, and an LST computation in
+// between does not store the host clock either.
 TEST_CASE("OnStep Telescope Driver - UTCDate throws InvalidOperation when the mount clock cannot be read",
           "[onstep][telescope][unit][utc-offset]") {
     alpacacore::test::FakeTaskClock clock;  // outlives the driver
