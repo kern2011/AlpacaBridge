@@ -530,6 +530,25 @@ TEST_CASE("Gemini Focuser Link - a cable pulled during a poll ends the poll at o
     REQUIRE_NOTHROW(rig.driver().set_connected(false));
 }
 
+TEST_CASE("Gemini Focuser Link - a cable pulled during a poll's temperature read ends the poll at once",
+          "[gemini][focuser][unit][fake][link-lost]") {
+    GeminiRig rig;
+    REQUIRE(rig.connect());
+    const std::string old_pts = rig.fake().slave_path();
+
+    // The ":06#" read is optional, so its failure is swallowed in measure(); the poll must still end in this cycle
+    // (probe() throws, so the frame is dropped), not park for the next tick with the link already gone.
+    rig.fake().hold_reply_to(":06#", 300ms);
+    std::thread pull = unplug_when_asked(rig.fake(), ":06#", rig.fake().count(":06#"));
+    rig.clock().advance(kTick);
+    REQUIRE(rig.clock().wait_for_woken_settled(kBound));
+    pull.join();
+    CHECK(rig.clock().waiter_count() == 0);  // no second tick was needed: on_lost ran, the poll is not parked
+    require_lost(rig.driver(), old_pts);
+    CHECK(reports_loss(rig.driver()));
+    REQUIRE_NOTHROW(rig.driver().set_connected(false));
+}
+
 TEST_CASE("Gemini Focuser Link - a cable pulled during the connect's first poll fails the Connect",
           "[gemini][focuser][unit][fake][link-lost]") {
     GeminiRig rig;

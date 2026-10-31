@@ -425,10 +425,17 @@ private:
     // Position and IsMoving, and is not retried for kTemperatureRetry.
     StateFrame probe() {
         try {
-            return measure();
+            StateFrame frame = measure();
+            // The optional temperature read swallows its own failure, so a hangup there returns normally. The
+            // wrapper has released the port: throw so the frame is not published and the catch below ends the poll
+            // in this cycle, not on the next tick.
+            if (!protocol_.link_alive()) {
+                throw AlpacaException("Gemini focuser link lost during the poll", AlpacaError::NotConnected);
+            }
+            return frame;
         } catch (...) {
             // Positive evidence (the wrapper saw the port gone, on this
-            // exchange or an earlier one): the poll's loss latch is set at
+            // exchange, the optional temperature read or an earlier one): the poll's loss latch is set at
             // once, so the poll ends after this cycle (decision 0009 rule 2a).
             if (!protocol_.link_alive()) state_.lose_link();
             throw;
