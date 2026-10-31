@@ -573,7 +573,7 @@ TEST_CASE("Gemini Focuser Link - a cable pulled during the connect's temperature
     require_alpaca_error([&] { rig.driver().set_connected(true); }, kNotConnected);
     pull.join();
     CHECK_FALSE(rig.driver().get_connected());
-    CHECK(rig.clock().waiter_count() == 0);  // the poll body the seed started was joined
+    CHECK(rig.clock().waiter_count() == 0);  // no poll body was started: the seed published no frame
     CHECK(rig.driver().get_link_fault().empty());
 }
 
