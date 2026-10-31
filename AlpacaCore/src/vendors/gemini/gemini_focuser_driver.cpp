@@ -226,17 +226,19 @@ public:
             // reply gets one retry. A connect whose retry also publishes
             // nothing fails: Connected true means the getters have a frame to
             // serve (decisions 0010 and 0016).
-            // A port that died during this seed (the firmware query or the
-            // first frame) fails the connect too: the wrapper has released it,
-            // so Connected must not go true. The disconnect() below also clears
-            // the wrapper's loss reason: a connect that never completed is not
-            // a lost session, and the reason reaches the client in this error.
+            // A port that died during this seed (the firmware query, the first
+            // frame or its optional temperature read) fails the connect too,
+            // with no frame published (probe() throws on a released port): the
+            // wrapper has released it, so Connected must not go true. The
+            // disconnect() below also clears the wrapper's loss reason: a
+            // connect that never completed is not a lost session, and the
+            // reason reaches the client in this error.
             state_.reset();
             temperature_retry_at_.reset();
             poll_cancelled_.store(false);
             const bool started = state_.start();
             const bool lost = !protocol_.link_alive();
-            if (!started || lost) {
+            if (!started) {
                 state_.stop_and_join();
                 state_.reset();
                 {

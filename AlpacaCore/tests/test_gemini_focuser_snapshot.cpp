@@ -566,7 +566,8 @@ TEST_CASE("Gemini Focuser Link - a cable pulled during the connect's first poll 
 TEST_CASE("Gemini Focuser Link - a cable pulled during the connect's temperature read fails the Connect",
           "[gemini][focuser][unit][fake][link-lost]") {
     GeminiRig rig;
-    // The seed's ":06#" read is optional, so its hangup still lets the first frame publish.
+    // The ":06#" read is optional, so its hangup is swallowed by measure(); probe() sees the released port and
+    // throws, so no frame publishes and the Connect fails NotConnected.
     rig.fake().hold_reply_to(":06#", 300ms);
     std::thread pull = unplug_when_asked(rig.fake(), ":06#", 0);
     require_alpaca_error([&] { rig.driver().set_connected(true); }, kNotConnected);
