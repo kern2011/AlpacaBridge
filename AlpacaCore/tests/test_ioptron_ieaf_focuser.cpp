@@ -21,7 +21,6 @@
 #include <atomic>
 #include <cerrno>
 #include <chrono>
-#include <filesystem>
 #include <functional>
 #include <string>
 #include <thread>
@@ -327,30 +326,8 @@ TEST_CASE("iOptron iEAF protocol wrapper - a hangup before the reply throws seri
 
 namespace {
 
+using alpacacore::test::ReplugPort;
 using std::chrono::milliseconds;
-
-// A by-id style symlink the driver is configured with, so a replugged focuser (a
-// new fake on a new pty) comes back under the same name, as a by-id path does.
-// The driver never holds the raw /dev/pts/N, which devpts reissues once freed.
-struct ReplugPort {
-    std::filesystem::path path;
-    explicit ReplugPort(const alpacacore::test::FakeIoptronIeaf& fake) {
-        static std::atomic<int> serial{0};
-        path = std::filesystem::temp_directory_path() /
-               ("alpacacore-ieaf-" + std::to_string(::getpid()) + "-" + std::to_string(serial.fetch_add(1)));
-        std::filesystem::create_symlink(fake.slave_path(), path);
-    }
-    void replug(const alpacacore::test::FakeIoptronIeaf& fake) {
-        std::filesystem::remove(path);
-        std::filesystem::create_symlink(fake.slave_path(), path);
-    }
-    ~ReplugPort() {
-        std::error_code ec;
-        std::filesystem::remove(path, ec);
-    }
-    ReplugPort(const ReplugPort&) = delete;
-    ReplugPort& operator=(const ReplugPort&) = delete;
-};
 
 // Real time: these waits are for the fake's reader thread to see a command on the wire.
 template <typename Pred>
